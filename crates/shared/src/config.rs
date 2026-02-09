@@ -15,6 +15,7 @@ pub const RETAIL_ARRIVAL_RATE: f64 = 0.8; // midpoint of [0.6, 1.0]
 pub const RETAIL_MEAN_SIZE: f64 = 20.0; // midpoint of [19, 21]
 pub const RETAIL_SIZE_SIGMA: f64 = 1.2;
 pub const RETAIL_BUY_PROB: f64 = 0.5;
+pub const MIN_ARB_PROFIT: f64 = 0.01; // 1 cent in quote token (Y)
 
 #[derive(Debug, Clone)]
 pub struct SimulationConfig {
@@ -29,6 +30,7 @@ pub struct SimulationConfig {
     pub retail_mean_size: f64,
     pub retail_size_sigma: f64,
     pub retail_buy_prob: f64,
+    pub min_arb_profit: f64,
     pub seed: u64,
 }
 
@@ -46,6 +48,7 @@ impl Default for SimulationConfig {
             retail_mean_size: RETAIL_MEAN_SIZE,
             retail_size_sigma: RETAIL_SIZE_SIGMA,
             retail_buy_prob: RETAIL_BUY_PROB,
+            min_arb_profit: MIN_ARB_PROFIT,
             seed: 0,
         }
     }
@@ -79,7 +82,8 @@ impl HyperparameterVariance {
         let mut rng = Pcg64::seed_from_u64(seed);
         SimulationConfig {
             gbm_sigma: rng.gen_range(self.gbm_sigma_min..self.gbm_sigma_max),
-            retail_arrival_rate: rng.gen_range(self.retail_arrival_rate_min..self.retail_arrival_rate_max),
+            retail_arrival_rate: rng
+                .gen_range(self.retail_arrival_rate_min..self.retail_arrival_rate_max),
             retail_mean_size: rng.gen_range(self.retail_mean_size_min..self.retail_mean_size_max),
             seed,
             ..base.clone()
@@ -89,5 +93,16 @@ impl HyperparameterVariance {
     pub fn generate_configs(&self, n: u32) -> Vec<SimulationConfig> {
         let base = SimulationConfig::default();
         (0..n).map(|i| self.apply(&base, i as u64)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SimulationConfig;
+
+    #[test]
+    fn default_min_arb_profit_is_one_cent() {
+        let config = SimulationConfig::default();
+        assert!((config.min_arb_profit - 0.01).abs() < 1e-12);
     }
 }

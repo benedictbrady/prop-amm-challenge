@@ -27,7 +27,7 @@ fn run_sim_inner(
         config.retail_buy_prob,
         config.seed.wrapping_add(1),
     );
-    let arb = Arbitrageur::new();
+    let arb = Arbitrageur::new(config.min_arb_profit);
     let router = OrderRouter::new();
 
     let mut submission_edge = 0.0_f64;
