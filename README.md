@@ -50,7 +50,7 @@ There's no free lunch from slightly undercutting either. The optimal strategy de
 - Arrival rate `lambda ~ U[0.6, 1.0]` per step
 - Mean order size `~ U[19, 21]` in Y terms
 
-**Arbitrage**: Binary search for the optimal trade that pushes spot price to fair price. Efficient — don't try to extract value from informed flow.
+**Arbitrage**: Binary search for the optimal trade that pushes spot price to fair price. Efficient — don't try to extract value from informed flow. Trades are skipped unless expected arb profit is at least `0.01` Y (1 cent).
 
 **Order routing**: Grid search over split ratio alpha in [0, 1]. The router picks the split that maximizes total output. Small pricing differences can shift large fractions of volume.
 
