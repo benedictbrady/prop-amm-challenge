@@ -7,6 +7,7 @@ use crate::arbitrageur::Arbitrageur;
 use crate::price_process::GBMPriceProcess;
 use crate::retail::RetailTrader;
 use crate::router::OrderRouter;
+use crate::search::DeterministicSearch;
 
 fn run_sim_inner(
     mut amm_sub: BpfAmm,
@@ -29,20 +30,37 @@ fn run_sim_inner(
     );
     let arb = Arbitrageur::new(config.min_arb_profit);
     let router = OrderRouter::new();
+    let search = DeterministicSearch::new(
+        config.seed.wrapping_add(2),
+        config.retail_mean_size,
+        config.retail_size_sigma,
+    );
 
     let mut submission_edge = 0.0_f64;
 
-    for _ in 0..config.n_steps {
+    for step in 0..config.n_steps {
+        let mut event = 0u32;
         let fair_price = price.step();
 
-        if let Some(result) = arb.execute_arb(&mut amm_sub, fair_price) {
+        if let Some(result) = arb.execute_arb(&mut amm_sub, fair_price, &search, step, event) {
             submission_edge += result.edge;
         }
-        arb.execute_arb(&mut amm_norm, fair_price);
+        event = event.wrapping_add(1);
+        arb.execute_arb(&mut amm_norm, fair_price, &search, step, event);
+        event = event.wrapping_add(1);
 
         let orders = retail.generate_orders();
         for order in &orders {
-            let trades = router.route_order(order, &mut amm_sub, &mut amm_norm, fair_price);
+            let trades = router.route_order(
+                order,
+                &mut amm_sub,
+                &mut amm_norm,
+                fair_price,
+                &search,
+                step,
+                event,
+            );
+            event = event.wrapping_add(1);
             for trade in trades {
                 if trade.is_submission {
                     let trade_edge = if trade.amm_buys_x {
@@ -68,8 +86,18 @@ pub fn run_simulation(
     normalizer_program: BpfProgram,
     config: &SimulationConfig,
 ) -> anyhow::Result<SimResult> {
-    let amm_sub = BpfAmm::new(submission_program, config.initial_x, config.initial_y, "submission".to_string());
-    let amm_norm = BpfAmm::new(normalizer_program, config.initial_x, config.initial_y, "normalizer".to_string());
+    let amm_sub = BpfAmm::new(
+        submission_program,
+        config.initial_x,
+        config.initial_y,
+        "submission".to_string(),
+    );
+    let amm_norm = BpfAmm::new(
+        normalizer_program,
+        config.initial_x,
+        config.initial_y,
+        "normalizer".to_string(),
+    );
     run_sim_inner(amm_sub, amm_norm, config)
 }
 
@@ -81,8 +109,20 @@ pub fn run_simulation_native(
     normalizer_after_swap: Option<AfterSwapFn>,
     config: &SimulationConfig,
 ) -> anyhow::Result<SimResult> {
-    let amm_sub = BpfAmm::new_native(submission_fn, submission_after_swap, config.initial_x, config.initial_y, "submission".to_string());
-    let amm_norm = BpfAmm::new_native(normalizer_fn, normalizer_after_swap, config.initial_x, config.initial_y, "normalizer".to_string());
+    let amm_sub = BpfAmm::new_native(
+        submission_fn,
+        submission_after_swap,
+        config.initial_x,
+        config.initial_y,
+        "submission".to_string(),
+    );
+    let amm_norm = BpfAmm::new_native(
+        normalizer_fn,
+        normalizer_after_swap,
+        config.initial_x,
+        config.initial_y,
+        "normalizer".to_string(),
+    );
     run_sim_inner(amm_sub, amm_norm, config)
 }
 
@@ -93,7 +133,18 @@ pub fn run_simulation_mixed(
     normalizer_after_swap: Option<AfterSwapFn>,
     config: &SimulationConfig,
 ) -> anyhow::Result<SimResult> {
-    let amm_sub = BpfAmm::new(submission_program, config.initial_x, config.initial_y, "submission".to_string());
-    let amm_norm = BpfAmm::new_native(normalizer_fn, normalizer_after_swap, config.initial_x, config.initial_y, "normalizer".to_string());
+    let amm_sub = BpfAmm::new(
+        submission_program,
+        config.initial_x,
+        config.initial_y,
+        "submission".to_string(),
+    );
+    let amm_norm = BpfAmm::new_native(
+        normalizer_fn,
+        normalizer_after_swap,
+        config.initial_x,
+        config.initial_y,
+        "normalizer".to_string(),
+    );
     run_sim_inner(amm_sub, amm_norm, config)
 }

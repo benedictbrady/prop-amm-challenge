@@ -50,9 +50,9 @@ There's no free lunch from slightly undercutting either. The optimal strategy de
 - Arrival rate `lambda ~ U[0.6, 1.0]` per step
 - Mean order size `~ U[19, 21]` in Y terms
 
-**Arbitrage**: Binary search for the optimal trade that pushes spot price to fair price. Efficient — don't try to extract value from informed flow. Trades are skipped unless expected arb profit is at least `0.01` Y (1 cent).
+**Arbitrage**: Deterministic probe search over retail-like candidate sizes (with fixed tail exploration) to find profitable clips and push spot price toward fair price. Trades are skipped unless expected arb profit is above `min_arb_profit` (default `0.01` Y, i.e. 1 cent).
 
-**Order routing**: Grid search over split ratio alpha in [0, 1]. The router picks the split that maximizes total output. Small pricing differences can shift large fractions of volume.
+**Order routing**: Deterministic probe search over split size to maximize total output across both pools. Small pricing differences can shift large fractions of volume.
 
 ### Edge
 
@@ -103,8 +103,8 @@ To persist updated storage, call the `sol_set_storage` syscall with your modifie
 - After router executes routed trades
 
 **When it is NOT called:**
-- During router quoting (grid search for optimal split)
-- During arbitrageur quoting (binary search for optimal size)
+- During router quoting (deterministic probe search for optimal split)
+- During arbitrageur quoting (deterministic probe search for profitable size)
 
 ### Requirements
 
