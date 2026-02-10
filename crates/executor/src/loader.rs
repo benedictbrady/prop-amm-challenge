@@ -7,7 +7,9 @@ use solana_rbpf::{
     vm::Config,
 };
 
-use crate::syscalls::{SyscallAbort, SyscallContext, SyscallLog, SyscallSetReturnData, SyscallSetStorage};
+use crate::syscalls::{
+    SyscallAbort, SyscallContext, SyscallLog, SyscallSetReturnData, SyscallSetStorage,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutorError {
@@ -34,8 +36,7 @@ pub struct BpfProgram {
 
 impl BpfProgram {
     pub fn load(elf_bytes: &[u8]) -> Result<Self, ExecutorError> {
-        let mut function_registry =
-            FunctionRegistry::<BuiltinFunction<SyscallContext>>::default();
+        let mut function_registry = FunctionRegistry::<BuiltinFunction<SyscallContext>>::default();
 
         function_registry
             .register_function_hashed(*b"sol_set_return_data", SyscallSetReturnData::vm)

@@ -1,4 +1,4 @@
-use prop_amm_shared::instruction::{encode_swap_instruction, encode_after_swap, STORAGE_SIZE};
+use prop_amm_shared::instruction::{encode_after_swap, encode_swap_instruction, STORAGE_SIZE};
 
 /// A swap function signature: takes instruction data (with storage appended), returns output amount.
 pub type SwapFn = fn(&[u8]) -> u64;
@@ -15,7 +15,10 @@ pub struct NativeExecutor {
 
 impl NativeExecutor {
     pub fn new(swap_fn: SwapFn, after_swap_fn: Option<AfterSwapFn>) -> Self {
-        Self { swap_fn, after_swap_fn }
+        Self {
+            swap_fn,
+            after_swap_fn,
+        }
     }
 
     #[inline]

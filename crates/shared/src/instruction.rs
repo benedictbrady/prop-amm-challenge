@@ -23,7 +23,12 @@ pub const SWAP_INSTRUCTION_SIZE: usize = INSTRUCTION_SIZE + STORAGE_SIZE; // 104
 /// | 34        | 1024 | storage       | [u8] | Current storage state          |
 pub const AFTER_SWAP_SIZE: usize = 34 + STORAGE_SIZE; // 1058
 
-pub fn encode_instruction(side: u8, input_amount: u64, reserve_x: u64, reserve_y: u64) -> [u8; INSTRUCTION_SIZE] {
+pub fn encode_instruction(
+    side: u8,
+    input_amount: u64,
+    reserve_x: u64,
+    reserve_y: u64,
+) -> [u8; INSTRUCTION_SIZE] {
     let mut data = [0u8; INSTRUCTION_SIZE];
     data[0] = side;
     data[1..9].copy_from_slice(&input_amount.to_le_bytes());
@@ -40,7 +45,13 @@ pub fn decode_instruction(data: &[u8]) -> (u8, u64, u64, u64) {
     (side, input_amount, reserve_x, reserve_y)
 }
 
-pub fn encode_swap_instruction(side: u8, input_amount: u64, reserve_x: u64, reserve_y: u64, storage: &[u8]) -> Vec<u8> {
+pub fn encode_swap_instruction(
+    side: u8,
+    input_amount: u64,
+    reserve_x: u64,
+    reserve_y: u64,
+    storage: &[u8],
+) -> Vec<u8> {
     let mut data = vec![0u8; SWAP_INSTRUCTION_SIZE];
     data[0] = side;
     data[1..9].copy_from_slice(&input_amount.to_le_bytes());
@@ -51,7 +62,14 @@ pub fn encode_swap_instruction(side: u8, input_amount: u64, reserve_x: u64, rese
     data
 }
 
-pub fn encode_after_swap(side: u8, input_amount: u64, output_amount: u64, reserve_x: u64, reserve_y: u64, storage: &[u8]) -> Vec<u8> {
+pub fn encode_after_swap(
+    side: u8,
+    input_amount: u64,
+    output_amount: u64,
+    reserve_x: u64,
+    reserve_y: u64,
+    storage: &[u8],
+) -> Vec<u8> {
     let mut data = vec![0u8; AFTER_SWAP_SIZE];
     data[0] = 2; // tag
     data[1] = side;
@@ -71,7 +89,14 @@ pub fn decode_after_swap(data: &[u8]) -> (u8, u64, u64, u64, u64, &[u8]) {
     let reserve_x = u64::from_le_bytes(data[18..26].try_into().unwrap());
     let reserve_y = u64::from_le_bytes(data[26..34].try_into().unwrap());
     let storage = &data[34..];
-    (side, input_amount, output_amount, reserve_x, reserve_y, storage)
+    (
+        side,
+        input_amount,
+        output_amount,
+        reserve_x,
+        reserve_y,
+        storage,
+    )
 }
 
 #[cfg(test)]

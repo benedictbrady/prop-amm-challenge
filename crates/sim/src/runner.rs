@@ -45,7 +45,15 @@ pub fn run_batch_native(
     let results: Result<Vec<SimResult>, _> = pool.install(|| {
         configs
             .par_iter()
-            .map(|config| engine::run_simulation_native(submission_fn, submission_after_swap, normalizer_fn, normalizer_after_swap, config))
+            .map(|config| {
+                engine::run_simulation_native(
+                    submission_fn,
+                    submission_after_swap,
+                    normalizer_fn,
+                    normalizer_after_swap,
+                    config,
+                )
+            })
             .collect()
     });
 
@@ -62,7 +70,9 @@ pub fn run_default_batch(
     let variance = HyperparameterVariance::default();
     let mut base = SimulationConfig::default();
     base.n_steps = n_steps;
-    let configs: Vec<_> = (0..n_sims).map(|i| variance.apply(&base, i as u64)).collect();
+    let configs: Vec<_> = (0..n_sims)
+        .map(|i| variance.apply(&base, i as u64))
+        .collect();
     run_batch(submission_program, normalizer_program, configs, n_workers)
 }
 
@@ -77,7 +87,9 @@ pub fn run_default_batch_mixed(
     let variance = HyperparameterVariance::default();
     let mut base = SimulationConfig::default();
     base.n_steps = n_steps;
-    let configs: Vec<_> = (0..n_sims).map(|i| variance.apply(&base, i as u64)).collect();
+    let configs: Vec<_> = (0..n_sims)
+        .map(|i| variance.apply(&base, i as u64))
+        .collect();
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_workers.unwrap_or_else(|| rayon::current_num_threads().min(8)))
@@ -108,6 +120,15 @@ pub fn run_default_batch_native(
     let variance = HyperparameterVariance::default();
     let mut base = SimulationConfig::default();
     base.n_steps = n_steps;
-    let configs: Vec<_> = (0..n_sims).map(|i| variance.apply(&base, i as u64)).collect();
-    run_batch_native(submission_fn, submission_after_swap, normalizer_fn, normalizer_after_swap, configs, n_workers)
+    let configs: Vec<_> = (0..n_sims)
+        .map(|i| variance.apply(&base, i as u64))
+        .collect();
+    run_batch_native(
+        submission_fn,
+        submission_after_swap,
+        normalizer_fn,
+        normalizer_after_swap,
+        configs,
+        n_workers,
+    )
 }

@@ -1,8 +1,8 @@
-use std::time::Instant;
 use prop_amm_executor::{BpfExecutor, BpfProgram, NativeExecutor};
 use prop_amm_shared::instruction::STORAGE_SIZE;
 use prop_amm_shared::nano::f64_to_nano;
 use prop_amm_shared::normalizer::compute_swap as normalizer_swap;
+use std::time::Instant;
 
 const NORMALIZER_SO: &[u8] =
     include_bytes!("../../../programs/normalizer/target/deploy/normalizer.so");
@@ -32,7 +32,11 @@ pub fn run_profile() {
     let bpf_elapsed = start.elapsed();
     let bpf_us = bpf_elapsed.as_micros() as f64 / n as f64;
     println!("=== Per-call Benchmark ===");
-    println!("BPF:    {:.1}µs/call ({:.0} calls/sec)", bpf_us, 1_000_000.0 / bpf_us);
+    println!(
+        "BPF:    {:.1}µs/call ({:.0} calls/sec)",
+        bpf_us,
+        1_000_000.0 / bpf_us
+    );
 
     // Native benchmark
     let start = Instant::now();
@@ -41,7 +45,11 @@ pub fn run_profile() {
     }
     let native_elapsed = start.elapsed();
     let native_us = native_elapsed.as_nanos() as f64 / n as f64 / 1000.0;
-    println!("Native: {:.3}µs/call ({:.0} calls/sec)", native_us, 1_000_000.0 / native_us);
+    println!(
+        "Native: {:.3}µs/call ({:.0} calls/sec)",
+        native_us,
+        1_000_000.0 / native_us
+    );
     println!("Speedup: {:.0}x", bpf_us / native_us);
 
     // Full sim benchmarks
@@ -60,7 +68,8 @@ pub fn run_profile() {
 
     // Native sim
     let start = Instant::now();
-    let _ = crate::engine::run_simulation_native(normalizer_swap, None, normalizer_swap, None, &config);
+    let _ =
+        crate::engine::run_simulation_native(normalizer_swap, None, normalizer_swap, None, &config);
     let native_sim = start.elapsed();
 
     // Mixed sim (BPF submission + native normalizer)

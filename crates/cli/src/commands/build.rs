@@ -19,7 +19,11 @@ pub fn run(path: &str) -> anyhow::Result<()> {
     }
 
     // Find the native library
-    let ext = if cfg!(target_os = "macos") { "dylib" } else { "so" };
+    let ext = if cfg!(target_os = "macos") {
+        "dylib"
+    } else {
+        "so"
+    };
     let output = Command::new("find")
         .arg(format!("{}/target/release", path))
         .arg("-maxdepth")

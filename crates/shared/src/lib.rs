@@ -1,5 +1,5 @@
-pub mod nano;
-pub mod instruction;
 pub mod config;
-pub mod result;
+pub mod instruction;
+pub mod nano;
 pub mod normalizer;
+pub mod result;
