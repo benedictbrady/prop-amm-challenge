@@ -6,22 +6,24 @@ Your program runs inside a simulation against a benchmark AMM. Retail traders ar
 
 ## Quick Start
 
+1. Copy `programs/starter/src/lib.rs` as your starting point
+2. Implement your pricing logic in `compute_swap`
+3. Submit your `lib.rs` source code to the web UI — the server compiles and runs it
+
+For local development, use the CLI:
+
 ```bash
 # Copy the starter template
 cp -r programs/starter programs/my-strategy
-# Edit programs/my-strategy/Cargo.toml — change the package name
-# Edit programs/my-strategy/src/lib.rs — implement your pricing logic
 
-# Build native + BPF
+# Edit your pricing logic
+edit programs/my-strategy/src/lib.rs
+
+# Build for local testing
 prop-amm build programs/my-strategy
 
 # Run 1000 simulations locally (~5s on Apple M3 Pro)
 prop-amm run programs/my-strategy/target/release/libmy_strategy.dylib
-
-# Validate BPF program before submitting
-prop-amm validate programs/my-strategy/target/deploy/my_strategy.so
-
-# Submit the .so file to the API
 ```
 
 ## How the Simulation Works
@@ -175,10 +177,12 @@ pub unsafe extern "C" fn after_swap_ffi(
 - The arbitrageur is efficient — don't try to extract value from informed flow
 - Storage is zero-initialized at the start of each simulation and persists across all trades within a simulation
 
-## CLI
+## Local Development (CLI)
+
+The CLI lets you iterate quickly on your strategy before submitting:
 
 ```bash
-# Build native + BPF
+# Build for local testing
 prop-amm build programs/my-strategy
 
 # Run simulations (default: 1000 sims, 10k steps each)
@@ -186,31 +190,28 @@ prop-amm run <path-to-native-lib>
 
 # Fewer sims for quick iteration
 prop-amm run <path-to-native-lib> --simulations 10
-
-# Validate BPF program
-prop-amm validate <path-to-bpf.so>
 ```
 
 The 30 bps normalizer typically scores around 250-350 edge per simulation.
 
-## Performance
-
-Simulations run natively via `dlopen` — your Rust code executes directly, no BPF interpreter overhead. BPF is only used for the submission `.so` file validation.
+Local simulations run natively via `dlopen` — your Rust code executes directly with no BPF interpreter overhead. The engine parallelizes across simulations using up to 8 worker threads.
 
 | Workload                  | Time           | Platform         |
 |---------------------------|----------------|------------------|
 | 1,000 sims / 10k steps   | ~5s            | Apple M3 Pro, 12 cores |
 | Single sim / 10k steps   | ~5ms           | Native execution |
 
-The engine parallelizes across simulations using up to 8 worker threads by default.
-
 ## Submission
 
-Build your BPF `.so` and upload it to the submission API:
+Submit your `lib.rs` source code through the web UI. The server handles compilation, validation, and simulation — you don't need any toolchain beyond what's needed for local testing.
 
-```bash
-cargo build-sbf --manifest-path programs/my-strategy/Cargo.toml
-# Upload: programs/my-strategy/target/deploy/my_strategy.so
-```
+The server validates your program (monotonicity, convexity), then runs 1,000 simulations against the normalizer. Local results may diverge slightly from submission scores due to different RNG seeds and hyperparameter variance.
 
-Local results may diverge slightly from submission scores due to different RNG seeds and hyperparameter variance. Run more simulations locally to reduce variance.
+### Restrictions
+
+Your submitted source code must be a single `lib.rs` file. The only allowed dependency is `pinocchio` (for Solana BPF syscalls). The following are blocked for security:
+
+- `include!()`, `include_str!()`, `include_bytes!()` (compile-time file access)
+- `env!()`, `option_env!()` (compile-time environment access)
+- `extern crate` declarations
+- External module files (`mod foo;`)
