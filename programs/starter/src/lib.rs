@@ -1,5 +1,6 @@
 use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
 
+const NAME: &str = "My Strategy";
 const FEE_NUMERATOR: u128 = 950;
 const FEE_DENOMINATOR: u128 = 1000;
 
