@@ -4,11 +4,39 @@ use prop_amm_shared::nano::f64_to_nano;
 use prop_amm_shared::normalizer::compute_swap as normalizer_swap;
 use std::time::Instant;
 
-const NORMALIZER_SO: &[u8] =
-    include_bytes!("../../../programs/normalizer/target/deploy/normalizer.so");
+const NORMALIZER_SO_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../programs/normalizer/target/deploy/normalizer.so"
+);
+
+fn load_normalizer_program() -> Option<BpfProgram> {
+    let bytes = match std::fs::read(NORMALIZER_SO_PATH) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            eprintln!(
+                "Skipping BPF benchmark: normalizer .so not found at {} ({})",
+                NORMALIZER_SO_PATH, err
+            );
+            eprintln!(
+                "Build it first with: cargo build-sbf --manifest-path programs/normalizer/Cargo.toml"
+            );
+            return None;
+        }
+    };
+
+    match BpfProgram::load(&bytes) {
+        Ok(program) => Some(program),
+        Err(err) => {
+            eprintln!("Skipping BPF benchmark: failed to load normalizer .so ({err})");
+            None
+        }
+    }
+}
 
 pub fn run_profile() {
-    let program = BpfProgram::load(NORMALIZER_SO).expect("load");
+    let Some(program) = load_normalizer_program() else {
+        return;
+    };
     let mut bpf_exec = BpfExecutor::new(program.clone());
     let native_exec = NativeExecutor::new(normalizer_swap, None);
 
@@ -60,8 +88,8 @@ pub fn run_profile() {
     };
 
     // BPF sim
-    let p1 = BpfProgram::load(NORMALIZER_SO).expect("load");
-    let p2 = BpfProgram::load(NORMALIZER_SO).expect("load");
+    let p1 = program.clone();
+    let p2 = program.clone();
     let start = Instant::now();
     let _ = crate::engine::run_simulation(p1, p2, &config);
     let bpf_sim = start.elapsed();
@@ -73,7 +101,7 @@ pub fn run_profile() {
     let native_sim = start.elapsed();
 
     // Mixed sim (BPF submission + native normalizer)
-    let p1 = BpfProgram::load(NORMALIZER_SO).expect("load");
+    let p1 = program.clone();
     let start = Instant::now();
     let _ = crate::engine::run_simulation_mixed(p1, normalizer_swap, None, &config);
     let mixed_sim = start.elapsed();

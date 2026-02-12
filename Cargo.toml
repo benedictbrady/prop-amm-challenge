@@ -10,6 +10,7 @@ members = [
 exclude = [
     "programs/normalizer",
     "programs/starter",
+    ".build",
 ]
 
 [workspace.dependencies]

@@ -13,6 +13,9 @@ Your program runs inside a simulation against a benchmark AMM. Retail traders ar
 For local development, use the CLI:
 
 ```bash
+# Install the CLI once (from this repo)
+cargo install --path crates/cli
+
 # Copy the starter template
 cp programs/starter/src/lib.rs my_amm.rs
 
@@ -21,6 +24,9 @@ edit my_amm.rs
 
 # Run 1000 simulations locally (~5s on Apple M3 Pro)
 prop-amm run my_amm.rs
+
+# Or run without installing the binary globally
+cargo run -p prop-amm -- run my_amm.rs
 ```
 
 The CLI compiles your source file and runs it natively — no toolchain setup required beyond Rust.
