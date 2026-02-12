@@ -25,6 +25,7 @@ struct QuotePoint {
 
 struct SplitSearchResult {
     best: QuotePoint,
+    sampled: Vec<QuotePoint>,
 }
 
 impl OrderRouter {
@@ -55,6 +56,11 @@ impl OrderRouter {
     ) -> Vec<RoutedTrade> {
         let search =
             Self::maximize_split(|alpha| Self::quote_buy_split(total_y, alpha, amm_sub, amm_norm));
+        Self::enforce_submission_monotonicity(
+            amm_sub,
+            &search.sampled.iter().map(|p| (p.in_sub, p.out_sub)).collect::<Vec<_>>(),
+            "buy",
+        );
         let best = search.best;
 
         let mut trades = Vec::new();
@@ -94,6 +100,11 @@ impl OrderRouter {
     ) -> Vec<RoutedTrade> {
         let search =
             Self::maximize_split(|alpha| Self::quote_sell_split(total_x, alpha, amm_sub, amm_norm));
+        Self::enforce_submission_monotonicity(
+            amm_sub,
+            &search.sampled.iter().map(|p| (p.in_sub, p.out_sub)).collect::<Vec<_>>(),
+            "sell",
+        );
         let best = search.best;
 
         let mut trades = Vec::new();
@@ -187,17 +198,22 @@ impl OrderRouter {
     where
         F: FnMut(f64) -> QuotePoint,
     {
+        let mut sampled = Vec::with_capacity(GOLDEN_MAX_ITERS + 6);
         let mut left = 0.0_f64;
         let mut right = 1.0_f64;
 
         let edge_left = evaluate(left);
         let edge_right = evaluate(right);
+        sampled.push(edge_left);
+        sampled.push(edge_right);
         let mut best = Self::best_quote(edge_left, edge_right);
 
         let mut x1 = right - GOLDEN_RATIO_CONJUGATE * (right - left);
         let mut x2 = left + GOLDEN_RATIO_CONJUGATE * (right - left);
         let mut q1 = evaluate(x1);
         let mut q2 = evaluate(x2);
+        sampled.push(q1);
+        sampled.push(q2);
         best = Self::best_quote(best, q1);
         best = Self::best_quote(best, q2);
 
@@ -212,6 +228,7 @@ impl OrderRouter {
                 q1 = q2;
                 x2 = left + GOLDEN_RATIO_CONJUGATE * (right - left);
                 q2 = evaluate(x2);
+                sampled.push(q2);
                 best = Self::best_quote(best, q2);
             } else {
                 right = x2;
@@ -219,14 +236,16 @@ impl OrderRouter {
                 q2 = q1;
                 x1 = right - GOLDEN_RATIO_CONJUGATE * (right - left);
                 q1 = evaluate(x1);
+                sampled.push(q1);
                 best = Self::best_quote(best, q1);
             }
         }
 
         let center = evaluate((left + right) * 0.5);
+        sampled.push(center);
         best = Self::best_quote(best, center);
 
-        SplitSearchResult { best }
+        SplitSearchResult { best, sampled }
     }
 
     #[inline]
@@ -248,6 +267,32 @@ impl OrderRouter {
         }
     }
 
+    fn enforce_submission_monotonicity(
+        amm_sub: &BpfAmm,
+        points: &[(f64, f64)],
+        side_label: &str,
+    ) {
+        if amm_sub.name != "submission" {
+            return;
+        }
+        let mut sorted: Vec<(f64, f64)> = points
+            .iter()
+            .copied()
+            .filter(|(i, o)| i.is_finite() && o.is_finite() && *i > MIN_TRADE_SIZE)
+            .collect();
+        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        for window in sorted.windows(2) {
+            let (in_a, out_a) = window[0];
+            let (in_b, out_b) = window[1];
+            if in_b > in_a + 1e-9 && out_b + 1e-9 < out_a {
+                panic!(
+                    "submission monotonicity violation during router {side_label} split search: \
+                     input {in_a:.6} -> output {out_a:.6}, input {in_b:.6} -> output {out_b:.6}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -62,14 +62,18 @@ impl Arbitrageur {
 
     fn arb_buy_x(&mut self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbResult> {
         let start_y = self.sample_retail_size_y().min(MAX_INPUT_AMOUNT);
+        let mut sampled_curve = Vec::with_capacity(BRACKET_MAX_STEPS + GOLDEN_MAX_ITERS + 8);
         let (lo, hi) = Self::bracket_maximum(start_y, MAX_INPUT_AMOUNT, |input_y| {
             let output_x = amm.quote_buy_x(input_y);
+            sampled_curve.push((input_y, output_x));
             output_x * fair_price - input_y
         });
         let (optimal_y, _) = Self::golden_section_max(lo, hi, |input_y| {
             let output_x = amm.quote_buy_x(input_y);
+            sampled_curve.push((input_y, output_x));
             output_x * fair_price - input_y
         });
+        Self::enforce_submission_monotonicity(amm, &sampled_curve, "buy");
 
         if optimal_y < MIN_INPUT {
             return None;
@@ -102,14 +106,18 @@ impl Arbitrageur {
         let start_x = (self.sample_retail_size_y() / fair_price.max(1e-9))
             .max(MIN_INPUT)
             .min(MAX_INPUT_AMOUNT);
+        let mut sampled_curve = Vec::with_capacity(BRACKET_MAX_STEPS + GOLDEN_MAX_ITERS + 8);
         let (lo, hi) = Self::bracket_maximum(start_x, MAX_INPUT_AMOUNT, |input_x| {
             let output_y = amm.quote_sell_x(input_x);
+            sampled_curve.push((input_x, output_y));
             output_y - input_x * fair_price
         });
         let (optimal_x, _) = Self::golden_section_max(lo, hi, |input_x| {
             let output_y = amm.quote_sell_x(input_x);
+            sampled_curve.push((input_x, output_y));
             output_y - input_x * fair_price
         });
+        Self::enforce_submission_monotonicity(amm, &sampled_curve, "sell");
 
         if optimal_x < MIN_INPUT {
             return None;
@@ -257,6 +265,32 @@ impl Arbitrageur {
         }
     }
 
+    fn enforce_submission_monotonicity(
+        amm: &BpfAmm,
+        points: &[(f64, f64)],
+        side_label: &str,
+    ) {
+        if amm.name != "submission" {
+            return;
+        }
+        let mut sorted: Vec<(f64, f64)> = points
+            .iter()
+            .copied()
+            .filter(|(i, o)| i.is_finite() && o.is_finite() && *i > MIN_INPUT)
+            .collect();
+        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        for window in sorted.windows(2) {
+            let (in_a, out_a) = window[0];
+            let (in_b, out_b) = window[1];
+            if in_b > in_a + 1e-9 && out_b + 1e-9 < out_a {
+                panic!(
+                    "submission monotonicity violation during arbitrage {side_label} search: \
+                     input {in_a:.6} -> output {out_a:.6}, input {in_b:.6} -> output {out_b:.6}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
