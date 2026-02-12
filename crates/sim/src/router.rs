@@ -284,7 +284,7 @@ impl OrderRouter {
         max_output: f64,
         side_label: &str,
     ) {
-        if amm_sub.name != "submission" || !amm_sub.uses_bpf_backend() {
+        if amm_sub.name != "submission" {
             return;
         }
         if !Self::is_curve_shape_valid(points, max_output) {
