@@ -9,10 +9,10 @@ pub const INITIAL_PRICE: f64 = 100.0;
 pub const INITIAL_X: f64 = 100.0;
 pub const INITIAL_Y: f64 = 10_000.0;
 pub const GBM_MU: f64 = 0.0;
-pub const GBM_SIGMA: f64 = 0.000945; // midpoint of [0.000882, 0.001008]
+pub const GBM_SIGMA: f64 = 0.000945; // baseline point estimate
 pub const GBM_DT: f64 = 1.0;
-pub const RETAIL_ARRIVAL_RATE: f64 = 0.8; // midpoint of [0.6, 1.0]
-pub const RETAIL_MEAN_SIZE: f64 = 20.0; // midpoint of [19, 21]
+pub const RETAIL_ARRIVAL_RATE: f64 = 0.8; // midpoint of [0.4, 1.2]
+pub const RETAIL_MEAN_SIZE: f64 = 20.0; // midpoint of [12, 28]
 pub const RETAIL_SIZE_SIGMA: f64 = 1.2;
 pub const RETAIL_BUY_PROB: f64 = 0.5;
 pub const MIN_ARB_PROFIT: f64 = 0.01; // 1 cent in quote token (Y)
@@ -75,15 +75,15 @@ pub struct HyperparameterVariance {
 impl Default for HyperparameterVariance {
     fn default() -> Self {
         Self {
-            gbm_sigma_min: 0.0005,
-            gbm_sigma_max: 0.002,
-            retail_arrival_rate_min: 0.6,
-            retail_arrival_rate_max: 1.0,
-            retail_mean_size_min: 19.0,
-            retail_mean_size_max: 21.0,
-            norm_fee_bps_min: 10,
-            norm_fee_bps_max: 100,
-            norm_liquidity_mult_min: 0.5,
+            gbm_sigma_min: 0.0001,
+            gbm_sigma_max: 0.007,
+            retail_arrival_rate_min: 0.4,
+            retail_arrival_rate_max: 1.2,
+            retail_mean_size_min: 12.0,
+            retail_mean_size_max: 28.0,
+            norm_fee_bps_min: 30,
+            norm_fee_bps_max: 80,
+            norm_liquidity_mult_min: 0.4,
             norm_liquidity_mult_max: 2.0,
         }
     }

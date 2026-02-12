@@ -367,19 +367,24 @@ fn test_hyperparameter_variance_generates_varied_configs() {
 
     let sigma_min = configs.iter().map(|c| c.gbm_sigma).fold(f64::INFINITY, f64::min);
     let sigma_max = configs.iter().map(|c| c.gbm_sigma).fold(f64::NEG_INFINITY, f64::max);
-    assert!(sigma_min >= 0.0005, "sigma_min {} below range", sigma_min);
-    assert!(sigma_max <= 0.002, "sigma_max {} above range", sigma_max);
-    assert!(sigma_max - sigma_min > 0.001, "sigma range too narrow: [{}, {}]", sigma_min, sigma_max);
+    assert!(sigma_min >= 0.0001, "sigma_min {} below range", sigma_min);
+    assert!(sigma_max <= 0.007, "sigma_max {} above range", sigma_max);
+    assert!(
+        sigma_max - sigma_min > 0.003,
+        "sigma range too narrow: [{}, {}]",
+        sigma_min,
+        sigma_max
+    );
 
     let fee_min = configs.iter().map(|c| c.norm_fee_bps).min().unwrap();
     let fee_max = configs.iter().map(|c| c.norm_fee_bps).max().unwrap();
-    assert!(fee_min >= 10, "fee_min {} below range", fee_min);
-    assert!(fee_max <= 100, "fee_max {} above range", fee_max);
+    assert!(fee_min >= 30, "fee_min {} below range", fee_min);
+    assert!(fee_max <= 80, "fee_max {} above range", fee_max);
     assert!(fee_max - fee_min > 30, "fee range too narrow: [{}, {}]", fee_min, fee_max);
 
     let liq_min = configs.iter().map(|c| c.norm_liquidity_mult).fold(f64::INFINITY, f64::min);
     let liq_max = configs.iter().map(|c| c.norm_liquidity_mult).fold(f64::NEG_INFINITY, f64::max);
-    assert!(liq_min >= 0.5, "liq_min {} below range", liq_min);
+    assert!(liq_min >= 0.4, "liq_min {} below range", liq_min);
     assert!(liq_max <= 2.0, "liq_max {} above range", liq_max);
     assert!(liq_max - liq_min > 0.5, "liq range too narrow: [{}, {}]", liq_min, liq_max);
 }
