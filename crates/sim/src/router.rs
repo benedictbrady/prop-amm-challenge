@@ -296,6 +296,8 @@ impl OrderRouter {
     }
 
     fn is_curve_shape_valid(points: &[(f64, f64)], max_output: f64) -> bool {
+        const MIN_INPUT_NANO: u64 = 1_000_000; // 0.001 units
+
         let max_output_nano = f64_to_nano(max_output);
         if max_output_nano == 0 {
             return false;
@@ -313,7 +315,10 @@ impl OrderRouter {
                 }
                 let input_nano = f64_to_nano(*input);
                 let output_nano = f64_to_nano(*output);
-                if output_nano == 0 || output_nano >= max_output_nano {
+                if input_nano < MIN_INPUT_NANO
+                    || output_nano == 0
+                    || output_nano >= max_output_nano
+                {
                     return None;
                 }
                 Some((input_nano, output_nano))
@@ -340,15 +345,28 @@ impl OrderRouter {
             return true;
         }
 
+        const MIN_DIN: u64 = 100_000;
+
+        let mut landmarks: Vec<(u64, u64)> = Vec::new();
+        for &(in_n, out_n) in &collapsed {
+            if let Some(&(last_in, _)) = landmarks.last() {
+                if in_n - last_in < MIN_DIN {
+                    continue;
+                }
+            }
+            landmarks.push((in_n, out_n));
+        }
+
+        if landmarks.len() < 3 {
+            return true;
+        }
+
         let mut prev_slope = f64::INFINITY;
-        for window in collapsed.windows(2) {
+        for window in landmarks.windows(2) {
             let (in_a, out_a) = window[0];
             let (in_b, out_b) = window[1];
             if out_b + 1 < out_a {
                 return false;
-            }
-            if in_b <= in_a {
-                continue;
             }
             let din = (in_b - in_a) as f64;
             let dout = out_b.saturating_sub(out_a) as f64;
@@ -356,7 +374,12 @@ impl OrderRouter {
             if slope < 0.0 {
                 return false;
             }
-            let slope_rounding_tol = 4.0 / din + 1e-12;
+            let ref_slope = if prev_slope.is_finite() {
+                prev_slope.max(slope)
+            } else {
+                slope
+            };
+            let slope_rounding_tol = ref_slope * 5e-4 + 8.0 / din;
             if slope > prev_slope + slope_rounding_tol {
                 return false;
             }
