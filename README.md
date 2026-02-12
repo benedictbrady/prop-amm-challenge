@@ -33,11 +33,11 @@ Each simulation runs **10,000 steps**. At each step:
 2. **Arbitrageurs trade** — they push each AMM's spot price toward the fair price, extracting profit from stale quotes
 3. **Retail orders arrive** — random buy/sell orders, routed optimally across both AMMs
 
-Your program competes against a **normalizer AMM** — a constant-product market maker with 30 bps fees. Both start with identical reserves (100 X, 10,000 Y at price 100).
+Your program competes against a **normalizer AMM** — a constant-product market maker whose fee and liquidity are sampled per simulation. Both pools start from the same base reserves (100 X, 10,000 Y at price 100), then the normalizer applies its sampled liquidity multiplier.
 
 ### Why the Normalizer Matters
 
-Without competition, setting 10% fees would appear profitable — huge spreads on the few trades that execute. The normalizer prevents this: if your pricing is too aggressive, retail routes to the 30 bps pool and you get nothing.
+Without competition, setting 10% fees would appear profitable — huge spreads on the few trades that execute. The normalizer prevents this: if your pricing is too aggressive, retail routes away from your pool and you get little flow.
 
 There's no free lunch from slightly undercutting either. The optimal strategy depends on market conditions, trade patterns, and how you manage the tradeoff between spread revenue and adverse selection.
 
@@ -45,11 +45,15 @@ There's no free lunch from slightly undercutting either. The optimal strategy de
 
 **Price process**: `S(t+1) = S(t) * exp(-sigma^2/2 + sigma*Z)` where `Z ~ N(0,1)`
 - No drift (mu = 0)
-- Per-step volatility varies across simulations: `sigma ~ U[0.088%, 0.101%]`
+- Per-step volatility varies across simulations: `sigma ~ U[0.01%, 0.70%]`
 
 **Retail flow**: Poisson arrival, log-normal sizes, 50/50 buy/sell
-- Arrival rate `lambda ~ U[0.6, 1.0]` per step
-- Mean order size `~ U[19, 21]` in Y terms
+- Arrival rate `lambda ~ U[0.4, 1.2]` per step
+- Mean order size `~ U[12, 28]` in Y terms
+
+**Normalizer parameters**:
+- Fee varies per simulation: `norm_fee_bps ~ U{30, 80}` (integer bps)
+- Liquidity varies per simulation: `norm_liquidity_mult ~ U[0.4, 2.0]`
 
 **Arbitrage**: Binary search for the optimal trade that pushes spot price to fair price. Efficient — don't try to extract value from informed flow. Trades are skipped unless expected arb profit is at least `0.01` Y (1 cent).
 
@@ -195,7 +199,7 @@ prop-amm build my_amm.rs
 prop-amm validate my_amm.rs
 ```
 
-The 30 bps normalizer typically scores around 250-350 edge per simulation.
+Normalizer performance varies materially across sampled fee/liquidity regimes, so benchmark edge distribution is wider than in a fixed-fee setting.
 
 ### Native vs BPF
 
