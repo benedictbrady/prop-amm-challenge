@@ -11,7 +11,7 @@ pub const INSTRUCTION_SIZE: usize = 25;
 pub const STORAGE_SIZE: usize = 1024;
 pub const SWAP_INSTRUCTION_SIZE: usize = INSTRUCTION_SIZE + STORAGE_SIZE; // 1049
 
-/// after_swap instruction layout (1058 bytes):
+/// after_swap instruction layout (1066 bytes):
 /// | Offset    | Size | Field         | Type | Description                    |
 /// |-----------|------|---------------|------|--------------------------------|
 /// | 0         | 1    | tag           | u8   | Always 2                       |
@@ -20,8 +20,9 @@ pub const SWAP_INSTRUCTION_SIZE: usize = INSTRUCTION_SIZE + STORAGE_SIZE; // 104
 /// | 10        | 8    | output_amount | u64  | Output token amount            |
 /// | 18        | 8    | reserve_x     | u64  | Post-trade X reserve           |
 /// | 26        | 8    | reserve_y     | u64  | Post-trade Y reserve           |
-/// | 34        | 1024 | storage       | [u8] | Current storage state          |
-pub const AFTER_SWAP_SIZE: usize = 34 + STORAGE_SIZE; // 1058
+/// | 34        | 8    | step          | u64  | Current simulation step        |
+/// | 42        | 1024 | storage       | [u8] | Current storage state          |
+pub const AFTER_SWAP_SIZE: usize = 42 + STORAGE_SIZE; // 1066
 
 pub fn encode_instruction(
     side: u8,
@@ -68,6 +69,7 @@ pub fn encode_after_swap(
     output_amount: u64,
     reserve_x: u64,
     reserve_y: u64,
+    step: u64,
     storage: &[u8],
 ) -> Vec<u8> {
     let mut data = vec![0u8; AFTER_SWAP_SIZE];
@@ -77,24 +79,27 @@ pub fn encode_after_swap(
     data[10..18].copy_from_slice(&output_amount.to_le_bytes());
     data[18..26].copy_from_slice(&reserve_x.to_le_bytes());
     data[26..34].copy_from_slice(&reserve_y.to_le_bytes());
+    data[34..42].copy_from_slice(&step.to_le_bytes());
     let copy_len = storage.len().min(STORAGE_SIZE);
-    data[34..34 + copy_len].copy_from_slice(&storage[..copy_len]);
+    data[42..42 + copy_len].copy_from_slice(&storage[..copy_len]);
     data
 }
 
-pub fn decode_after_swap(data: &[u8]) -> (u8, u64, u64, u64, u64, &[u8]) {
+pub fn decode_after_swap(data: &[u8]) -> (u8, u64, u64, u64, u64, u64, &[u8]) {
     let side = data[1];
     let input_amount = u64::from_le_bytes(data[2..10].try_into().unwrap());
     let output_amount = u64::from_le_bytes(data[10..18].try_into().unwrap());
     let reserve_x = u64::from_le_bytes(data[18..26].try_into().unwrap());
     let reserve_y = u64::from_le_bytes(data[26..34].try_into().unwrap());
-    let storage = &data[34..];
+    let step = u64::from_le_bytes(data[34..42].try_into().unwrap());
+    let storage = &data[42..];
     (
         side,
         input_amount,
         output_amount,
         reserve_x,
         reserve_y,
+        step,
         storage,
     )
 }
@@ -135,14 +140,15 @@ mod tests {
     #[test]
     fn test_after_swap_roundtrip() {
         let storage = [0xCD; STORAGE_SIZE];
-        let data = encode_after_swap(1, 100, 200, 300, 400, &storage);
+        let data = encode_after_swap(1, 100, 200, 300, 400, 777, &storage);
         assert_eq!(data.len(), AFTER_SWAP_SIZE);
-        let (side, inp, out, rx, ry, stor) = decode_after_swap(&data);
+        let (side, inp, out, rx, ry, step, stor) = decode_after_swap(&data);
         assert_eq!(side, 1);
         assert_eq!(inp, 100);
         assert_eq!(out, 200);
         assert_eq!(rx, 300);
         assert_eq!(ry, 400);
+        assert_eq!(step, 777);
         assert_eq!(stor, &storage[..]);
     }
 }

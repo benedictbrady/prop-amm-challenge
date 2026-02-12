@@ -3,11 +3,16 @@ use prop_amm_shared::instruction::STORAGE_SIZE;
 use prop_amm_shared::nano::NANO_SCALE_F64;
 use prop_amm_shared::nano::{f64_to_nano, nano_to_f64};
 
-pub fn run(so_path: &str) -> anyhow::Result<()> {
-    println!("Validating program: {}", so_path);
+use super::compile;
+
+pub fn run(file: &str) -> anyhow::Result<()> {
+    println!("Compiling {} (BPF)...", file);
+    let so_path = compile::compile_bpf(file)?;
+
+    println!("Validating program: {}", so_path.display());
 
     // Load ELF
-    let elf_bytes = std::fs::read(so_path)?;
+    let elf_bytes = std::fs::read(&so_path)?;
     let program =
         BpfProgram::load(&elf_bytes).map_err(|e| anyhow::anyhow!("Failed to load ELF: {}", e))?;
     println!("  [PASS] ELF loaded and verified");
@@ -154,7 +159,7 @@ pub fn run(so_path: &str) -> anyhow::Result<()> {
         } else {
             (rx.saturating_add(amount), ry.saturating_sub(out))
         };
-        executor.execute_after_swap(side, amount, out, post_rx, post_ry, &mut storage)?;
+        executor.execute_after_swap(side, amount, out, post_rx, post_ry, seed, &mut storage)?;
 
         for side in [0u8, 1u8] {
             check_curve_shape(

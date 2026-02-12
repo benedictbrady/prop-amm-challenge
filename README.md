@@ -14,17 +14,16 @@ For local development, use the CLI:
 
 ```bash
 # Copy the starter template
-cp -r programs/starter programs/my-strategy
+cp programs/starter/src/lib.rs my_amm.rs
 
 # Edit your pricing logic
-edit programs/my-strategy/src/lib.rs
-
-# Build for local testing
-prop-amm build programs/my-strategy
+edit my_amm.rs
 
 # Run 1000 simulations locally (~5s on Apple M3 Pro)
-prop-amm run programs/my-strategy/target/deploy/my_strategy.so
+prop-amm run my_amm.rs
 ```
+
+The CLI compiles your source file and runs it natively — no toolchain setup required beyond Rust.
 
 ## How the Simulation Works
 
@@ -86,7 +85,7 @@ Return 8 bytes via `sol_set_return_data` — the `output_amount: u64` (1e9 scale
 
 ### afterSwap (Optional)
 
-After each **real trade** (not during quoting), the engine calls your program with tag byte `2`. This lets you update your 1024-byte storage — useful for strategies that adapt over time (dynamic fees, volatility tracking, etc.).
+After each **real trade** (not during quoting), the engine calls your program with tag byte `2`. This lets you update your 1024-byte storage and observe the current simulation step — useful for strategies that adapt over time (dynamic fees, volatility tracking, etc.).
 
 | Offset | Size | Field         | Type   | Description                    |
 |--------|------|---------------|--------|--------------------------------|
@@ -96,7 +95,8 @@ After each **real trade** (not during quoting), the engine calls your program wi
 | 10     | 8    | output_amount | u64    | Output token amount (1e9 scale)|
 | 18     | 8    | reserve_x     | u64    | Post-trade X reserve           |
 | 26     | 8    | reserve_y     | u64    | Post-trade Y reserve           |
-| 34     | 1024 | storage       | [u8]   | Current storage (read/write)   |
+| 34     | 8    | step          | u64    | Current simulation step        |
+| 42     | 1024 | storage       | [u8]   | Current storage (read/write)   |
 
 To persist updated storage, call the `sol_set_storage` syscall with your modified buffer. If you don't call it, storage remains unchanged. The starter program's afterSwap is a no-op — storage is entirely optional.
 
@@ -118,7 +118,7 @@ To persist updated storage, call the `sol_set_storage` syscall with your modifie
 
 ## Writing a Program
 
-Start with `programs/starter/` — a constant-product AMM with 50 bps fees. The key pieces:
+Start with `programs/starter/` — a constant-product AMM with 500 bps fees. The key pieces:
 
 ```rust
 use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
@@ -179,27 +179,44 @@ pub unsafe extern "C" fn after_swap_ffi(
 
 ## Local Development (CLI)
 
-The CLI lets you iterate quickly on your strategy before submitting:
+The CLI compiles and runs your `.rs` source file directly — no manual build step needed.
 
 ```bash
-# Build for local testing
-prop-amm build programs/my-strategy
-
 # Run simulations (default: 1000 sims, 10k steps each)
-prop-amm run <path-to-bpf-so>
+prop-amm run my_amm.rs
 
 # Fewer sims for quick iteration
-prop-amm run <path-to-bpf-so> --simulations 10
+prop-amm run my_amm.rs --simulations 10
+
+# Build only (native + BPF artifacts)
+prop-amm build my_amm.rs
+
+# Validate convexity and monotonicity
+prop-amm validate my_amm.rs
 ```
 
 The 30 bps normalizer typically scores around 250-350 edge per simulation.
 
-To enforce stateless quote behavior, local simulations execute the submission strategy through the BPF runtime. The normalizer still runs natively for speed, and the engine parallelizes across simulations using up to 8 worker threads.
+### Native vs BPF
+
+By default, `prop-amm run` compiles your program as a **native shared library** and runs it directly. This is fast enough for rapid iteration — 1,000 simulations complete in seconds.
+
+BPF mode (`--bpf`) runs your program through the Solana BPF interpreter, which is **~100x slower**. Use it only as a final check before submitting to verify your program compiles and behaves correctly under the BPF runtime. Don't use it for day-to-day development.
+
+```bash
+# Fast iteration (native, default)
+prop-amm run my_amm.rs
+
+# Final validation before submission (BPF, slow)
+prop-amm run my_amm.rs --bpf --simulations 10
+```
+
+The engine parallelizes across simulations using up to 8 worker threads (configurable with `--workers`).
 
 | Workload                  | Time           | Platform         |
 |---------------------------|----------------|------------------|
-| 1,000 sims / 10k steps   | ~5s            | Apple M3 Pro, 12 cores |
-| Single sim / 10k steps   | ~5ms           | Native execution |
+| 1,000 sims / 10k steps   | ~5s            | Apple M3 Pro, native |
+| 1,000 sims / 10k steps   | ~15 min        | Apple M3 Pro, BPF |
 
 ## Submission
 

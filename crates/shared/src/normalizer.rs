@@ -20,16 +20,23 @@ pub fn compute_swap(data: &[u8]) -> u64 {
         return 0;
     }
 
+    let fee_bps = if data.len() >= 27 {
+        let raw = u16::from_le_bytes([data[25], data[26]]);
+        if raw == 0 { 30u128 } else { raw as u128 }
+    } else {
+        30u128
+    };
+
     let k = reserve_x * reserve_y;
 
     match side {
         0 => {
-            let net = input_amount * 997 / 1000;
+            let net = input_amount * (10000 - fee_bps) / 10000;
             let new_ry = reserve_y + net;
             reserve_x.saturating_sub((k + new_ry - 1) / new_ry) as u64
         }
         1 => {
-            let net = input_amount * 997 / 1000;
+            let net = input_amount * (10000 - fee_bps) / 10000;
             let new_rx = reserve_x + net;
             reserve_y.saturating_sub((k + new_rx - 1) / new_rx) as u64
         }

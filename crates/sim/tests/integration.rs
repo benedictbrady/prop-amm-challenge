@@ -1,5 +1,5 @@
 use prop_amm_executor::NativeExecutor;
-use prop_amm_shared::config::SimulationConfig;
+use prop_amm_shared::config::{HyperparameterVariance, SimulationConfig};
 use prop_amm_shared::instruction::STORAGE_SIZE;
 use prop_amm_shared::nano::{f64_to_nano, nano_to_f64};
 use prop_amm_shared::normalizer::{
@@ -231,7 +231,8 @@ fn test_after_swap_noop() {
     let exec = starter_exec();
     let mut storage = [0u8; STORAGE_SIZE];
 
-    exec.execute_after_swap(0, 1000, 500, 2000, 3000, &mut storage);
+    exec.execute_after_swap(0, 1000, 500, 2000, 3000, 0, &mut storage);
+    // Storage should remain unchanged (starter is a no-op)
     assert_eq!(storage, [0u8; STORAGE_SIZE]);
 }
 
@@ -285,4 +286,100 @@ fn test_storage_reset_between_simulations() {
         result1.submission_edge, result2.submission_edge,
         "same config should produce identical results when storage resets"
     );
+}
+
+#[test]
+fn test_native_normalizer_fee_from_storage() {
+    use prop_amm_shared::normalizer::compute_swap;
+    use prop_amm_shared::instruction::encode_swap_instruction;
+
+    let rx = f64_to_nano(100.0);
+    let ry = f64_to_nano(10000.0);
+    let input = f64_to_nano(100.0);
+
+    // Default (zero storage) → 30bps
+    let storage_zero = [0u8; STORAGE_SIZE];
+    let data_zero = encode_swap_instruction(0, input, rx, ry, &storage_zero);
+    let out_default = compute_swap(&data_zero);
+
+    // Explicit 30bps → same as default
+    let mut storage_30 = [0u8; STORAGE_SIZE];
+    storage_30[0..2].copy_from_slice(&30u16.to_le_bytes());
+    let data_30 = encode_swap_instruction(0, input, rx, ry, &storage_30);
+    let out_30 = compute_swap(&data_30);
+    assert_eq!(out_default, out_30, "zero storage should equal explicit 30bps");
+
+    // 100bps (1%) → less output than 30bps
+    let mut storage_100 = [0u8; STORAGE_SIZE];
+    storage_100[0..2].copy_from_slice(&100u16.to_le_bytes());
+    let data_100 = encode_swap_instruction(0, input, rx, ry, &storage_100);
+    let out_100 = compute_swap(&data_100);
+    assert!(out_100 < out_30, "100bps ({}) should give less output than 30bps ({})", out_100, out_30);
+
+    // 10bps → more output than 30bps
+    let mut storage_10 = [0u8; STORAGE_SIZE];
+    storage_10[0..2].copy_from_slice(&10u16.to_le_bytes());
+    let data_10 = encode_swap_instruction(0, input, rx, ry, &storage_10);
+    let out_10 = compute_swap(&data_10);
+    assert!(out_10 > out_30, "10bps ({}) should give more output than 30bps ({})", out_10, out_30);
+}
+
+#[test]
+fn test_norm_liquidity_mult_affects_edge() {
+    use prop_amm_shared::normalizer::{compute_swap as norm_swap, after_swap as norm_after};
+
+    // Low liquidity normalizer (0.5x) — easier to beat
+    let config_low = SimulationConfig {
+        n_steps: 1000,
+        seed: 42,
+        norm_liquidity_mult: 0.5,
+        ..SimulationConfig::default()
+    };
+    let result_low = prop_amm_sim::engine::run_simulation_native(
+        norm_swap, Some(norm_after), norm_swap, Some(norm_after), &config_low,
+    ).unwrap();
+
+    // High liquidity normalizer (2.0x) — harder to beat
+    let config_high = SimulationConfig {
+        n_steps: 1000,
+        seed: 42,
+        norm_liquidity_mult: 2.0,
+        ..SimulationConfig::default()
+    };
+    let result_high = prop_amm_sim::engine::run_simulation_native(
+        norm_swap, Some(norm_after), norm_swap, Some(norm_after), &config_high,
+    ).unwrap();
+
+    // Different liquidity should produce different edges
+    assert!(
+        (result_low.submission_edge - result_high.submission_edge).abs() > 0.01,
+        "different liquidity mults should produce different edges: low={}, high={}",
+        result_low.submission_edge, result_high.submission_edge
+    );
+}
+
+#[test]
+fn test_hyperparameter_variance_generates_varied_configs() {
+    let variance = HyperparameterVariance::default();
+    let configs = variance.generate_configs(100);
+
+    assert_eq!(configs.len(), 100);
+
+    let sigma_min = configs.iter().map(|c| c.gbm_sigma).fold(f64::INFINITY, f64::min);
+    let sigma_max = configs.iter().map(|c| c.gbm_sigma).fold(f64::NEG_INFINITY, f64::max);
+    assert!(sigma_min >= 0.0005, "sigma_min {} below range", sigma_min);
+    assert!(sigma_max <= 0.002, "sigma_max {} above range", sigma_max);
+    assert!(sigma_max - sigma_min > 0.001, "sigma range too narrow: [{}, {}]", sigma_min, sigma_max);
+
+    let fee_min = configs.iter().map(|c| c.norm_fee_bps).min().unwrap();
+    let fee_max = configs.iter().map(|c| c.norm_fee_bps).max().unwrap();
+    assert!(fee_min >= 10, "fee_min {} below range", fee_min);
+    assert!(fee_max <= 100, "fee_max {} above range", fee_max);
+    assert!(fee_max - fee_min > 30, "fee range too narrow: [{}, {}]", fee_min, fee_max);
+
+    let liq_min = configs.iter().map(|c| c.norm_liquidity_mult).fold(f64::INFINITY, f64::min);
+    let liq_max = configs.iter().map(|c| c.norm_liquidity_mult).fold(f64::NEG_INFINITY, f64::max);
+    assert!(liq_min >= 0.5, "liq_min {} below range", liq_min);
+    assert!(liq_max <= 2.0, "liq_max {} above range", liq_max);
+    assert!(liq_max - liq_min > 0.5, "liq range too narrow: [{}, {}]", liq_min, liq_max);
 }

@@ -37,7 +37,9 @@ fn run_sim_inner(
 
     let mut submission_edge = 0.0_f64;
 
-    for _ in 0..config.n_steps {
+    for step in 0..config.n_steps {
+        amm_sub.set_current_step(step as u64);
+        amm_norm.set_current_step(step as u64);
         let fair_price = price.step();
 
         if let Some(result) = arb.execute_arb(&mut amm_sub, fair_price) {
@@ -79,12 +81,15 @@ pub fn run_simulation(
         config.initial_y,
         "submission".to_string(),
     );
-    let amm_norm = BpfAmm::new(
+    let norm_x = config.initial_x * config.norm_liquidity_mult;
+    let norm_y = config.initial_y * config.norm_liquidity_mult;
+    let mut amm_norm = BpfAmm::new(
         normalizer_program,
-        config.initial_x,
-        config.initial_y,
+        norm_x,
+        norm_y,
         "normalizer".to_string(),
     );
+    amm_norm.set_initial_storage(&config.norm_fee_bps.to_le_bytes());
     run_sim_inner(amm_sub, amm_norm, config)
 }
 
@@ -103,13 +108,16 @@ pub fn run_simulation_native(
         config.initial_y,
         "submission".to_string(),
     );
-    let amm_norm = BpfAmm::new_native(
+    let norm_x = config.initial_x * config.norm_liquidity_mult;
+    let norm_y = config.initial_y * config.norm_liquidity_mult;
+    let mut amm_norm = BpfAmm::new_native(
         normalizer_fn,
         normalizer_after_swap,
-        config.initial_x,
-        config.initial_y,
+        norm_x,
+        norm_y,
         "normalizer".to_string(),
     );
+    amm_norm.set_initial_storage(&config.norm_fee_bps.to_le_bytes());
     run_sim_inner(amm_sub, amm_norm, config)
 }
 
@@ -126,12 +134,15 @@ pub fn run_simulation_mixed(
         config.initial_y,
         "submission".to_string(),
     );
-    let amm_norm = BpfAmm::new_native(
+    let norm_x = config.initial_x * config.norm_liquidity_mult;
+    let norm_y = config.initial_y * config.norm_liquidity_mult;
+    let mut amm_norm = BpfAmm::new_native(
         normalizer_fn,
         normalizer_after_swap,
-        config.initial_x,
-        config.initial_y,
+        norm_x,
+        norm_y,
         "normalizer".to_string(),
     );
+    amm_norm.set_initial_storage(&config.norm_fee_bps.to_le_bytes());
     run_sim_inner(amm_sub, amm_norm, config)
 }

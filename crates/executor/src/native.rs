@@ -35,10 +35,11 @@ impl NativeExecutor {
         output_amount: u64,
         rx: u64,
         ry: u64,
+        step: u64,
         storage: &mut [u8],
     ) {
         if let Some(after_swap) = self.after_swap_fn {
-            let data = encode_after_swap(side, input_amount, output_amount, rx, ry, storage);
+            let data = encode_after_swap(side, input_amount, output_amount, rx, ry, step, storage);
             let copy_len = storage.len().min(STORAGE_SIZE);
             after_swap(&data, &mut storage[..copy_len]);
         }

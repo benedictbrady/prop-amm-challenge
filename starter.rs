@@ -73,7 +73,7 @@ pub fn compute_swap(data: &[u8]) -> u64 {
     }
 }
 
-/// FFI export for native shared library loading (used by prop-amm run --native)
+/// FFI export for native shared library loading (used by prop-amm run)
 #[cfg(not(target_os = "solana"))]
 #[no_mangle]
 pub unsafe extern "C" fn compute_swap_ffi(data: *const u8, len: usize) -> u64 {
@@ -83,6 +83,11 @@ pub unsafe extern "C" fn compute_swap_ffi(data: *const u8, len: usize) -> u64 {
 /// FFI export for after_swap hook (no-op for starter)
 #[cfg(not(target_os = "solana"))]
 #[no_mangle]
-pub unsafe extern "C" fn after_swap_ffi(_data: *const u8, _data_len: usize, _storage: *mut u8, _storage_len: usize) {
+pub unsafe extern "C" fn after_swap_ffi(
+    _data: *const u8,
+    _data_len: usize,
+    _storage: *mut u8,
+    _storage_len: usize,
+) {
     // No-op: starter doesn't use storage
 }

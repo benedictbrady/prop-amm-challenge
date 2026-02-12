@@ -14,18 +14,18 @@ struct Cli {
 enum Commands {
     /// Build program (native for simulation, BPF for submission)
     Build {
-        /// Path to the program crate directory
-        path: String,
+        /// Path to the .rs source file
+        file: String,
     },
-    /// Validate a BPF .so program (convexity, monotonicity, CU)
+    /// Validate a program (convexity, monotonicity, CU)
     Validate {
-        /// Path to the compiled BPF .so file
-        so_path: String,
+        /// Path to the .rs source file
+        file: String,
     },
-    /// Run simulation batch (BPF submission runtime)
+    /// Run simulation batch
     Run {
-        /// Path to submission program artifact (BPF .so preferred; native lib accepted to locate companion BPF)
-        lib_path: String,
+        /// Path to the .rs source file
+        file: String,
         /// Number of simulations
         #[arg(long, default_value = "1000")]
         simulations: u32,
@@ -35,6 +35,9 @@ enum Commands {
         /// Number of parallel workers (0 = auto)
         #[arg(long, default_value = "0")]
         workers: usize,
+        /// Use BPF runtime instead of native (slower, for validation)
+        #[arg(long)]
+        bpf: bool,
     },
 }
 
@@ -42,13 +45,14 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { path } => commands::build::run(&path),
-        Commands::Validate { so_path } => commands::validate::run(&so_path),
+        Commands::Build { file } => commands::build::run(&file),
+        Commands::Validate { file } => commands::validate::run(&file),
         Commands::Run {
-            lib_path,
+            file,
             simulations,
             steps,
             workers,
-        } => commands::run::run(&lib_path, simulations, steps, workers),
+            bpf,
+        } => commands::run::run(&file, simulations, steps, workers, bpf),
     }
 }

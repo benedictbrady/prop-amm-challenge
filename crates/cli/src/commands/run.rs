@@ -1,20 +1,126 @@
-use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-use prop_amm_executor::BpfProgram;
+use prop_amm_executor::{AfterSwapFn, BpfProgram};
 use prop_amm_shared::normalizer::{
     after_swap as normalizer_after_swap_fn, compute_swap as normalizer_swap,
 };
 use prop_amm_sim::runner;
 
+use super::compile;
 use crate::output;
 
-pub fn run(program_path: &str, simulations: u32, steps: u32, workers: usize) -> anyhow::Result<()> {
-    let submission_program = load_submission_bpf(program_path)?;
+type FfiSwapFn = unsafe extern "C" fn(*const u8, usize) -> u64;
+type FfiAfterSwapFn = unsafe extern "C" fn(*const u8, usize, *mut u8, usize);
+
+static LOADED_SWAP: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static LOADED_AFTER_SWAP: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+fn dynamic_swap(data: &[u8]) -> u64 {
+    let ptr = LOADED_SWAP.load(Ordering::Relaxed);
+    let f: FfiSwapFn = unsafe { std::mem::transmute(ptr) };
+    unsafe { f(data.as_ptr(), data.len()) }
+}
+
+fn dynamic_after_swap(data: &[u8], storage: &mut [u8]) {
+    let ptr = LOADED_AFTER_SWAP.load(Ordering::Relaxed);
+    let f: FfiAfterSwapFn = unsafe { std::mem::transmute(ptr) };
+    unsafe { f(data.as_ptr(), data.len(), storage.as_mut_ptr(), storage.len()) }
+}
+
+pub fn run(
+    file: &str,
+    simulations: u32,
+    steps: u32,
+    workers: usize,
+    bpf: bool,
+) -> anyhow::Result<()> {
     let n_workers = if workers == 0 { None } else { Some(workers) };
 
+    if bpf {
+        run_bpf(file, simulations, steps, n_workers)
+    } else {
+        run_native(file, simulations, steps, n_workers)
+    }
+}
+
+fn run_native(
+    file: &str,
+    simulations: u32,
+    steps: u32,
+    n_workers: Option<usize>,
+) -> anyhow::Result<()> {
+    println!("Compiling {} (native)...", file);
+    let native_path = compile::compile_native(file)?;
+
+    // Load the native library — leak it so symbols remain valid for the process lifetime.
+    let lib = Box::new(
+        unsafe { libloading::Library::new(&native_path) }
+            .map_err(|e| anyhow::anyhow!("Failed to load {}: {}", native_path.display(), e))?,
+    );
+    let lib = Box::leak(lib);
+
+    let swap_fn: libloading::Symbol<FfiSwapFn> = unsafe { lib.get(b"compute_swap_ffi") }
+        .map_err(|e| anyhow::anyhow!("Missing compute_swap_ffi symbol: {}", e))?;
+    LOADED_SWAP.store(*swap_fn as *mut (), Ordering::Relaxed);
+
+    let has_after_swap =
+        if let Ok(after_fn) = unsafe { lib.get::<FfiAfterSwapFn>(b"after_swap_ffi") } {
+            LOADED_AFTER_SWAP.store(*after_fn as *mut (), Ordering::Relaxed);
+            true
+        } else {
+            false
+        };
+
+    let submission_after_swap: Option<AfterSwapFn> = if has_after_swap {
+        Some(dynamic_after_swap)
+    } else {
+        None
+    };
+
     println!(
-        "Running {} simulations ({} steps each) with BPF submission runtime...",
+        "Running {} simulations ({} steps each) natively...",
         simulations, steps,
+    );
+
+    let start = std::time::Instant::now();
+    let result = runner::run_default_batch_native(
+        dynamic_swap,
+        submission_after_swap,
+        normalizer_swap,
+        Some(normalizer_after_swap_fn),
+        simulations,
+        steps,
+        n_workers,
+    )?;
+    let elapsed = start.elapsed();
+
+    output::print_results(&result, elapsed);
+    Ok(())
+}
+
+fn run_bpf(
+    file: &str,
+    simulations: u32,
+    steps: u32,
+    n_workers: Option<usize>,
+) -> anyhow::Result<()> {
+    println!("Compiling {} (BPF)...", file);
+    let bpf_path = compile::compile_bpf(file)?;
+
+    let bytes = std::fs::read(&bpf_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", bpf_path.display(), e))?;
+    let submission_program = BpfProgram::load(&bytes)
+        .map_err(|e| anyhow::anyhow!("Failed to load BPF program: {}", e))?;
+
+    println!(
+        "Running {} simulations ({} steps each) via BPF{}...",
+        simulations,
+        steps,
+        if submission_program.jit_available() {
+            " (JIT)"
+        } else {
+            " (interpreter)"
+        },
     );
 
     let start = std::time::Instant::now();
@@ -30,78 +136,4 @@ pub fn run(program_path: &str, simulations: u32, steps: u32, workers: usize) -> 
 
     output::print_results(&result, elapsed);
     Ok(())
-}
-
-fn load_submission_bpf(path: &str) -> anyhow::Result<BpfProgram> {
-    let provided = Path::new(path);
-    if provided.exists() {
-        let bytes = std::fs::read(provided)
-            .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", provided.display(), e))?;
-        if let Ok(program) = BpfProgram::load(&bytes) {
-            return Ok(program);
-        }
-    }
-
-    let bpf_path = find_companion_bpf(provided).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Path {} is not a loadable BPF program and no companion BPF artifact was found. \
-             Pass the BPF .so path or build with `prop-amm build <crate-dir>` and pass the native library path.",
-            path
-        )
-    })?;
-
-    let bytes = std::fs::read(&bpf_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read BPF program {}: {}", bpf_path.display(), e))?;
-    BpfProgram::load(&bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to load BPF program {}: {}", bpf_path.display(), e))
-}
-
-fn find_companion_bpf(native_lib: &Path) -> Option<PathBuf> {
-    let release_dir = native_lib.parent()?;
-    if release_dir.file_name()?.to_str()? != "release" {
-        return None;
-    }
-    let target_dir = release_dir.parent()?;
-    if target_dir.file_name()?.to_str()? != "target" {
-        return None;
-    }
-    let crate_dir = target_dir.parent()?;
-    let cargo_toml = crate_dir.join("Cargo.toml");
-    let pkg_name = read_package_name(&cargo_toml)?;
-    let so_name = format!("{}.so", pkg_name.replace('-', "_"));
-    let bpf_path = crate_dir.join("target").join("deploy").join(so_name);
-    if bpf_path.exists() {
-        Some(bpf_path)
-    } else {
-        None
-    }
-}
-
-fn read_package_name(cargo_toml: &Path) -> Option<String> {
-    let contents = std::fs::read_to_string(cargo_toml).ok()?;
-    let mut in_package = false;
-    for line in contents.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_package = trimmed == "[package]";
-            continue;
-        }
-        if !in_package {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("name") {
-            let rest = rest.trim_start();
-            if !rest.starts_with('=') {
-                continue;
-            }
-            let mut value = rest[1..].trim();
-            if let Some(comment_idx) = value.find('#') {
-                value = value[..comment_idx].trim();
-            }
-            if value.starts_with('"') && value.ends_with('"') && value.len() >= 2 {
-                return Some(value[1..value.len() - 1].to_string());
-            }
-        }
-    }
-    None
 }

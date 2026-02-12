@@ -21,6 +21,7 @@ pub struct BpfExecutor {
     input_buf: Vec<u8>,
     stack: AlignedMemory<{ ebpf::HOST_ALIGN }>,
     heap: AlignedMemory<{ ebpf::HOST_ALIGN }>,
+    context: SyscallContext,
 }
 
 impl BpfExecutor {
@@ -33,17 +34,16 @@ impl BpfExecutor {
             heap: AlignedMemory::zero_filled(32 * 1024),
             program,
             input_buf,
+            context: SyscallContext::new(100_000),
         }
     }
 
-    fn run_vm(&mut self, instr_data_len: usize) -> Result<SyscallContext, ExecutorError> {
+    fn run_vm(&mut self, instr_data_len: usize) -> Result<(), ExecutorError> {
         // Write instruction data length
         self.input_buf[8..16].copy_from_slice(&(instr_data_len as u64).to_le_bytes());
 
-        // Zero the stack for each call
-        self.stack.as_slice_mut().fill(0);
-        // Zero heap to prevent hidden cross-call state in unsafe BPF code.
-        self.heap.as_slice_mut().fill(0);
+        // Reset context flags without reallocating storage Vec.
+        self.context.reset(100_000);
 
         let executable = self.program.executable();
         let loader = self.program.loader();
@@ -61,12 +61,10 @@ impl BpfExecutor {
         let memory_mapping = MemoryMapping::new(regions, config, sbpf_version)
             .map_err(|e| ExecutorError::Execution(e.to_string()))?;
 
-        let mut context = SyscallContext::new(100_000);
-
         let mut vm = EbpfVm::new(
             loader.clone(),
             sbpf_version,
-            &mut context,
+            &mut self.context,
             memory_mapping,
             stack_len,
         );
@@ -77,7 +75,7 @@ impl BpfExecutor {
         let result: Result<u64, _> = result.into();
         result.map_err(|e| ExecutorError::Execution(e.to_string()))?;
 
-        Ok(context)
+        Ok(())
     }
 
     pub fn execute(
@@ -101,13 +99,13 @@ impl BpfExecutor {
             self.input_buf[41 + copy_len..41 + STORAGE_SIZE].fill(0);
         }
 
-        let context = self.run_vm(SWAP_INSTRUCTION_SIZE)?;
+        self.run_vm(SWAP_INSTRUCTION_SIZE)?;
 
-        if !context.has_return_data {
+        if !self.context.has_return_data {
             return Err(ExecutorError::NoReturnData);
         }
 
-        Ok(u64::from_le_bytes(context.return_data))
+        Ok(u64::from_le_bytes(self.context.return_data))
     }
 
     pub fn execute_after_swap(
@@ -117,29 +115,31 @@ impl BpfExecutor {
         output_amount: u64,
         rx: u64,
         ry: u64,
+        step: u64,
         storage: &mut [u8],
     ) -> Result<(), ExecutorError> {
         self.input_buf.fill(0);
 
         // Write after_swap instruction data:
-        // [tag=2(1)][side(1)][input(8)][output(8)][rx(8)][ry(8)][storage(1024)]
+        // [tag=2(1)][side(1)][input(8)][output(8)][rx(8)][ry(8)][step(8)][storage(1024)]
         self.input_buf[16] = 2; // tag
         self.input_buf[17] = side;
         self.input_buf[18..26].copy_from_slice(&input_amount.to_le_bytes());
         self.input_buf[26..34].copy_from_slice(&output_amount.to_le_bytes());
         self.input_buf[34..42].copy_from_slice(&rx.to_le_bytes());
         self.input_buf[42..50].copy_from_slice(&ry.to_le_bytes());
+        self.input_buf[50..58].copy_from_slice(&step.to_le_bytes());
         let copy_len = storage.len().min(STORAGE_SIZE);
-        self.input_buf[50..50 + copy_len].copy_from_slice(&storage[..copy_len]);
+        self.input_buf[58..58 + copy_len].copy_from_slice(&storage[..copy_len]);
         if copy_len < STORAGE_SIZE {
-            self.input_buf[50 + copy_len..50 + STORAGE_SIZE].fill(0);
+            self.input_buf[58 + copy_len..58 + STORAGE_SIZE].fill(0);
         }
 
-        let context = self.run_vm(AFTER_SWAP_SIZE)?;
+        self.run_vm(AFTER_SWAP_SIZE)?;
 
-        if context.has_storage_update {
+        if self.context.has_storage_update {
             let out_len = storage.len().min(STORAGE_SIZE);
-            storage[..out_len].copy_from_slice(&context.storage_data[..out_len]);
+            storage[..out_len].copy_from_slice(&self.context.storage_data[..out_len]);
         }
 
         Ok(())

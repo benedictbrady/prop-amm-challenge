@@ -32,6 +32,8 @@ pub struct SimulationConfig {
     pub retail_buy_prob: f64,
     pub min_arb_profit: f64,
     pub seed: u64,
+    pub norm_fee_bps: u16,
+    pub norm_liquidity_mult: f64,
 }
 
 impl Default for SimulationConfig {
@@ -50,6 +52,8 @@ impl Default for SimulationConfig {
             retail_buy_prob: RETAIL_BUY_PROB,
             min_arb_profit: MIN_ARB_PROFIT,
             seed: 0,
+            norm_fee_bps: 30,
+            norm_liquidity_mult: 1.0,
         }
     }
 }
@@ -62,17 +66,25 @@ pub struct HyperparameterVariance {
     pub retail_arrival_rate_max: f64,
     pub retail_mean_size_min: f64,
     pub retail_mean_size_max: f64,
+    pub norm_fee_bps_min: u16,
+    pub norm_fee_bps_max: u16,
+    pub norm_liquidity_mult_min: f64,
+    pub norm_liquidity_mult_max: f64,
 }
 
 impl Default for HyperparameterVariance {
     fn default() -> Self {
         Self {
-            gbm_sigma_min: 0.000882,
-            gbm_sigma_max: 0.001008,
+            gbm_sigma_min: 0.0005,
+            gbm_sigma_max: 0.002,
             retail_arrival_rate_min: 0.6,
             retail_arrival_rate_max: 1.0,
             retail_mean_size_min: 19.0,
             retail_mean_size_max: 21.0,
+            norm_fee_bps_min: 10,
+            norm_fee_bps_max: 100,
+            norm_liquidity_mult_min: 0.5,
+            norm_liquidity_mult_max: 2.0,
         }
     }
 }
@@ -80,11 +92,19 @@ impl Default for HyperparameterVariance {
 impl HyperparameterVariance {
     pub fn apply(&self, base: &SimulationConfig, seed: u64) -> SimulationConfig {
         let mut rng = Pcg64::seed_from_u64(seed);
+        // Original 3 draws first — order preserved for seed reproducibility
+        let gbm_sigma = rng.gen_range(self.gbm_sigma_min..self.gbm_sigma_max);
+        let retail_arrival_rate = rng.gen_range(self.retail_arrival_rate_min..self.retail_arrival_rate_max);
+        let retail_mean_size = rng.gen_range(self.retail_mean_size_min..self.retail_mean_size_max);
+        // New draws appended
+        let norm_fee_bps = rng.gen_range(self.norm_fee_bps_min..=self.norm_fee_bps_max);
+        let norm_liquidity_mult = rng.gen_range(self.norm_liquidity_mult_min..self.norm_liquidity_mult_max);
         SimulationConfig {
-            gbm_sigma: rng.gen_range(self.gbm_sigma_min..self.gbm_sigma_max),
-            retail_arrival_rate: rng
-                .gen_range(self.retail_arrival_rate_min..self.retail_arrival_rate_max),
-            retail_mean_size: rng.gen_range(self.retail_mean_size_min..self.retail_mean_size_max),
+            gbm_sigma,
+            retail_arrival_rate,
+            retail_mean_size,
+            norm_fee_bps,
+            norm_liquidity_mult,
             seed,
             ..base.clone()
         }

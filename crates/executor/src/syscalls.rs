@@ -25,6 +25,13 @@ impl SyscallContext {
             remaining,
         }
     }
+
+    /// Reset for reuse without reallocating the storage Vec.
+    pub fn reset(&mut self, remaining: u64) {
+        self.has_return_data = false;
+        self.has_storage_update = false;
+        self.remaining = remaining;
+    }
 }
 
 impl ContextObject for SyscallContext {
