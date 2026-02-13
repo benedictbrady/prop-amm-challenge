@@ -126,6 +126,7 @@ To persist updated storage, call the `sol_set_storage` syscall with your modifie
 |---------------|--------------------------------------------------------------------|
 | **NAME**      | Must define `const NAME: &str = "...";` — shown on the leaderboard. |
 | **Monotonic** | Larger input must produce larger output.                           |
+| **Convex**    | Marginal price must worsen with trade size (no free lunches).      |
 | **< 100k CU** | Must execute within the compute unit limit.                       |
 
 ## Writing a Program
