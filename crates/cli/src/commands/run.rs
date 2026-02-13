@@ -36,8 +36,9 @@ pub fn run(
     bpf_so: Option<&str>,
 ) -> anyhow::Result<()> {
     let n_workers = if workers == 0 { None } else { Some(workers) };
+    let use_bpf = bpf || bpf_so.is_some();
 
-    if bpf {
+    if use_bpf {
         run_bpf(file, simulations, steps, n_workers, bpf_so)
     } else {
         run_native(file, simulations, steps, n_workers)

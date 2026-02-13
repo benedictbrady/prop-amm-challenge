@@ -162,5 +162,8 @@ fn find_bpf_so(build_dir: &Path) -> anyhow::Result<PathBuf> {
         }
     }
 
-    anyhow::bail!("No BPF .so found in {}/target/deploy/", build_dir.display())
+    anyhow::bail!(
+        "No BPF .so found in {}/target/deploy/",
+        build_dir.display()
+    )
 }

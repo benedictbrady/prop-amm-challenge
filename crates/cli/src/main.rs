@@ -38,8 +38,8 @@ enum Commands {
         /// Use BPF runtime instead of native (slower, for validation)
         #[arg(long)]
         bpf: bool,
-        /// Path to a prebuilt BPF .so to use when running with --bpf (skips compilation).
-        /// Useful on machines without the Solana SBF toolchain installed.
+        /// Path to a prebuilt BPF .so to use for BPF runs (skips compilation).
+        /// Passing this flag implies --bpf.
         #[arg(long)]
         bpf_so: Option<String>,
     },
