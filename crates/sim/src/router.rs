@@ -1,4 +1,5 @@
 use crate::amm::BpfAmm;
+use crate::curve_checks;
 use crate::retail::RetailOrder;
 use crate::search_stats;
 
@@ -13,6 +14,8 @@ const MIN_TRADE_SIZE: f64 = 0.001;
 const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_8;
 const GOLDEN_MAX_ITERS: usize = 14;
 const GOLDEN_ALPHA_TOL: f64 = 1e-3;
+// Stop once the submission split amount is within ~1% (relative bracket width in amount-space).
+const GOLDEN_SUBMISSION_AMOUNT_REL_TOL: f64 = 1e-2;
 // Stop once the two evaluated total outputs are within 1% of each other.
 const GOLDEN_SCORE_REL_GAP_TOL: f64 = 1e-2;
 
@@ -57,12 +60,18 @@ impl OrderRouter {
         amm_sub: &mut BpfAmm,
         amm_norm: &mut BpfAmm,
     ) -> Vec<RoutedTrade> {
-        let search =
-            Self::maximize_split(|alpha| Self::quote_buy_split(total_y, alpha, amm_sub, amm_norm));
-        Self::enforce_submission_monotonicity(
-            amm_sub,
-            &search.sampled.iter().map(|p| (p.in_sub, p.out_sub)).collect::<Vec<_>>(),
-            "buy",
+        let search = Self::maximize_split(total_y, |alpha| {
+            Self::quote_buy_split(total_y, alpha, amm_sub, amm_norm)
+        });
+        curve_checks::enforce_submission_monotonic_concave(
+            &amm_sub.name,
+            &search
+                .sampled
+                .iter()
+                .map(|p| (p.in_sub, p.out_sub))
+                .collect::<Vec<_>>(),
+            MIN_TRADE_SIZE,
+            "router buy split search",
         );
         let best = search.best;
 
@@ -101,12 +110,18 @@ impl OrderRouter {
         amm_sub: &mut BpfAmm,
         amm_norm: &mut BpfAmm,
     ) -> Vec<RoutedTrade> {
-        let search =
-            Self::maximize_split(|alpha| Self::quote_sell_split(total_x, alpha, amm_sub, amm_norm));
-        Self::enforce_submission_monotonicity(
-            amm_sub,
-            &search.sampled.iter().map(|p| (p.in_sub, p.out_sub)).collect::<Vec<_>>(),
-            "sell",
+        let search = Self::maximize_split(total_x, |alpha| {
+            Self::quote_sell_split(total_x, alpha, amm_sub, amm_norm)
+        });
+        curve_checks::enforce_submission_monotonic_concave(
+            &amm_sub.name,
+            &search
+                .sampled
+                .iter()
+                .map(|p| (p.in_sub, p.out_sub))
+                .collect::<Vec<_>>(),
+            MIN_TRADE_SIZE,
+            "router sell split search",
         );
         let best = search.best;
 
@@ -197,7 +212,7 @@ impl OrderRouter {
         }
     }
 
-    fn maximize_split<F>(mut evaluate: F) -> SplitSearchResult
+    fn maximize_split<F>(total_input: f64, mut evaluate: F) -> SplitSearchResult
     where
         F: FnMut(f64) -> QuotePoint,
     {
@@ -228,6 +243,14 @@ impl OrderRouter {
         for _ in 0..GOLDEN_MAX_ITERS {
             search_stats::inc_router_iter();
             if right - left <= GOLDEN_ALPHA_TOL {
+                break;
+            }
+
+            let alpha_mid = 0.5 * (left + right);
+            let sub_mid_amount = total_input * alpha_mid;
+            let amount_width = total_input * (right - left);
+            let amount_scale = sub_mid_amount.abs().max(MIN_TRADE_SIZE);
+            if amount_width <= GOLDEN_SUBMISSION_AMOUNT_REL_TOL * amount_scale {
                 break;
             }
 
@@ -294,33 +317,6 @@ impl OrderRouter {
             b
         } else {
             a
-        }
-    }
-
-    fn enforce_submission_monotonicity(
-        amm_sub: &BpfAmm,
-        points: &[(f64, f64)],
-        side_label: &str,
-    ) {
-        if amm_sub.name != "submission" {
-            return;
-        }
-        let mut sorted: Vec<(f64, f64)> = points
-            .iter()
-            .copied()
-            .filter(|(i, o)| i.is_finite() && o.is_finite() && *i > MIN_TRADE_SIZE)
-            .collect();
-        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        for window in sorted.windows(2) {
-            let (in_a, out_a) = window[0];
-            let (in_b, out_b) = window[1];
-            if in_b > in_a + 1e-9 && out_b + 1e-9 < out_a {
-                panic!(
-                    "submission monotonicity violation during router {side_label} split search: \
-                     input {in_a:.6} -> output {out_a:.6}, input {in_b:.6} -> output {out_b:.6}"
-                );
-            }
         }
     }
 }

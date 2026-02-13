@@ -1,4 +1,5 @@
 use crate::amm::BpfAmm;
+use crate::curve_checks;
 use crate::search_stats;
 use prop_amm_shared::nano::NANO_SCALE_F64;
 use rand::SeedableRng;
@@ -8,8 +9,8 @@ use rand_pcg::Pcg64;
 const MIN_INPUT: f64 = 0.001;
 const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_8;
 const GOLDEN_MAX_ITERS: usize = 12;
-// Stop once the bracket is narrow enough that the trade size is within ~5%.
-const GOLDEN_INPUT_REL_TOL: f64 = 5e-2;
+// Stop once the bracket is narrow enough that the trade size is within ~1%.
+const GOLDEN_INPUT_REL_TOL: f64 = 1e-2;
 const BRACKET_MAX_STEPS: usize = 24;
 const BRACKET_GROWTH: f64 = 2.0;
 const MAX_INPUT_AMOUNT: f64 = (u64::MAX as f64 / NANO_SCALE_F64) * 0.999_999;
@@ -149,7 +150,11 @@ impl Arbitrageur {
         let s = amm.storage();
         if s.len() >= 2 {
             let raw = u16::from_le_bytes([s[0], s[1]]);
-            if raw == 0 { 30 } else { raw }
+            if raw == 0 {
+                30
+            } else {
+                raw
+            }
         } else {
             30
         }
@@ -168,7 +173,12 @@ impl Arbitrageur {
             sampled_curve.push((input_y, output_x));
             output_x * fair_price - input_y
         });
-        Self::enforce_submission_monotonicity(amm, &sampled_curve, "buy");
+        curve_checks::enforce_submission_monotonic_concave(
+            &amm.name,
+            &sampled_curve,
+            MIN_INPUT,
+            "arbitrage buy search",
+        );
 
         if optimal_y < MIN_INPUT {
             return None;
@@ -212,7 +222,12 @@ impl Arbitrageur {
             sampled_curve.push((input_x, output_y));
             output_y - input_x * fair_price
         });
-        Self::enforce_submission_monotonicity(amm, &sampled_curve, "sell");
+        curve_checks::enforce_submission_monotonic_concave(
+            &amm.name,
+            &sampled_curve,
+            MIN_INPUT,
+            "arbitrage sell search",
+        );
 
         if optimal_x < MIN_INPUT {
             return None;
@@ -370,33 +385,6 @@ impl Arbitrageur {
             value
         } else {
             f64::NEG_INFINITY
-        }
-    }
-
-    fn enforce_submission_monotonicity(
-        amm: &BpfAmm,
-        points: &[(f64, f64)],
-        side_label: &str,
-    ) {
-        if amm.name != "submission" {
-            return;
-        }
-        let mut sorted: Vec<(f64, f64)> = points
-            .iter()
-            .copied()
-            .filter(|(i, o)| i.is_finite() && o.is_finite() && *i > MIN_INPUT)
-            .collect();
-        sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        for window in sorted.windows(2) {
-            let (in_a, out_a) = window[0];
-            let (in_b, out_b) = window[1];
-            if in_b > in_a + 1e-9 && out_b + 1e-9 < out_a {
-                panic!(
-                    "submission monotonicity violation during arbitrage {side_label} search: \
-                     input {in_a:.6} -> output {out_a:.6}, input {in_b:.6} -> output {out_b:.6}"
-                );
-            }
         }
     }
 }
