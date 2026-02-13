@@ -24,6 +24,8 @@ const PARITY_STEPS: u32 = 2_000;
 const PARITY_SEED_START: u64 = 9_001;
 const PARITY_SEED_STRIDE: u64 = 7;
 const PARITY_ABS_TOL: f64 = 1e-6;
+const CONCAVITY_DELTA_NANO: u64 = 1_000_000;
+const CONCAVITY_STEP_TOL_NANO: i128 = 1;
 
 fn dynamic_swap(data: &[u8]) -> u64 {
     let ptr = LOADED_SWAP.load(Ordering::Relaxed);
@@ -138,43 +140,59 @@ pub fn run(file: &str) -> anyhow::Result<()> {
 
     // Concavity check: marginal output per additional input must not increase.
     println!("  Checking concavity...");
-    let eps = 0.001;
-
-    // Buy side concavity: marginal X output per Y input should decrease.
-    let mut prev_marginal = f64::MAX;
+    // Buy side concavity: for fixed nano step Δ, discrete marginal output should not increase.
     for &size in &trade_sizes {
-        let out_lo = nano_to_f64(executor.execute(0, f64_to_nano(size), rx, ry, &storage)?);
-        let out_hi = nano_to_f64(executor.execute(0, f64_to_nano(size + eps), rx, ry, &storage)?);
-        let marginal = (out_hi - out_lo) / eps;
+        let in_0 = f64_to_nano(size);
+        let in_1 = in_0.saturating_add(CONCAVITY_DELTA_NANO);
+        let in_2 = in_1.saturating_add(CONCAVITY_DELTA_NANO);
 
-        if marginal > prev_marginal + 1e-9 {
+        if in_1 <= in_0 || in_2 <= in_1 {
+            continue;
+        }
+
+        let out_0 = executor.execute(0, in_0, rx, ry, &storage)? as i128;
+        let out_1 = executor.execute(0, in_1, rx, ry, &storage)? as i128;
+        let out_2 = executor.execute(0, in_2, rx, ry, &storage)? as i128;
+        let step_1 = out_1 - out_0;
+        let step_2 = out_2 - out_1;
+
+        if step_2 > step_1 + CONCAVITY_STEP_TOL_NANO {
             anyhow::bail!(
-                "FAIL: Concavity violation (buy side). At size={}, marginal={:.9} > prev={:.9}",
+                "FAIL: Concavity violation (buy side). At size={}, step2={} > step1={} (delta={} nanos)",
                 size,
-                marginal,
-                prev_marginal
+                step_2,
+                step_1,
+                CONCAVITY_DELTA_NANO
             );
         }
-        prev_marginal = marginal;
     }
     println!("  [PASS] Buy side concavity");
 
-    // Sell side concavity: marginal Y output per X input should decrease.
-    prev_marginal = f64::MAX;
+    // Sell side concavity: for fixed nano step Δ, discrete marginal output should not increase.
     for &size in &trade_sizes {
-        let out_lo = nano_to_f64(executor.execute(1, f64_to_nano(size), rx, ry, &storage)?);
-        let out_hi = nano_to_f64(executor.execute(1, f64_to_nano(size + eps), rx, ry, &storage)?);
-        let marginal = (out_hi - out_lo) / eps;
+        let in_0 = f64_to_nano(size);
+        let in_1 = in_0.saturating_add(CONCAVITY_DELTA_NANO);
+        let in_2 = in_1.saturating_add(CONCAVITY_DELTA_NANO);
 
-        if marginal > prev_marginal + 1e-9 {
+        if in_1 <= in_0 || in_2 <= in_1 {
+            continue;
+        }
+
+        let out_0 = executor.execute(1, in_0, rx, ry, &storage)? as i128;
+        let out_1 = executor.execute(1, in_1, rx, ry, &storage)? as i128;
+        let out_2 = executor.execute(1, in_2, rx, ry, &storage)? as i128;
+        let step_1 = out_1 - out_0;
+        let step_2 = out_2 - out_1;
+
+        if step_2 > step_1 + CONCAVITY_STEP_TOL_NANO {
             anyhow::bail!(
-                "FAIL: Concavity violation (sell side). At size={}, marginal={:.9} > prev={:.9}",
+                "FAIL: Concavity violation (sell side). At size={}, step2={} > step1={} (delta={} nanos)",
                 size,
-                marginal,
-                prev_marginal
+                step_2,
+                step_1,
+                CONCAVITY_DELTA_NANO
             );
         }
-        prev_marginal = marginal;
     }
     println!("  [PASS] Sell side concavity");
 

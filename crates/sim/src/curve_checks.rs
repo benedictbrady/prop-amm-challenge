@@ -88,6 +88,7 @@ mod tests {
     use super::submission_shape_violation;
     use crate::amm::BpfAmm;
     use prop_amm_shared::normalizer::compute_swap as normalizer_swap;
+    use rand::seq::SliceRandom;
     use rand::Rng;
     use rand::SeedableRng;
     use rand_pcg::Pcg64;
@@ -98,6 +99,124 @@ mod tests {
         if let Some(err) = submission_shape_violation(points, MIN_INPUT) {
             panic!("{context}: unexpected shape violation: {err}");
         }
+    }
+
+    fn linear_grid(max_input: f64, n: usize) -> Vec<f64> {
+        let start = MIN_INPUT * 1.01;
+        let span = (max_input - start).max(1e-6);
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / (n.saturating_sub(1).max(1)) as f64;
+                start + t * span
+            })
+            .collect()
+    }
+
+    fn geometric_grid(max_input: f64, n: usize) -> Vec<f64> {
+        let start = MIN_INPUT * 1.01;
+        let ratio = (max_input / start).max(1.0).powf(1.0 / (n.saturating_sub(1).max(1)) as f64);
+        (0..n)
+            .map(|i| start * ratio.powf(i as f64))
+            .collect()
+    }
+
+    fn clustered_grid(max_input: f64, n: usize, power: f64) -> Vec<f64> {
+        let start = MIN_INPUT * 1.01;
+        let span = (max_input - start).max(1e-6);
+        (0..n)
+            .map(|i| {
+                let t = i as f64 / (n.saturating_sub(1).max(1)) as f64;
+                start + t.powf(power) * span
+            })
+            .collect()
+    }
+
+    fn duplicated_unsorted_variant(base: &[(f64, f64)], rng: &mut Pcg64) -> Vec<(f64, f64)> {
+        let mut points = Vec::with_capacity(base.len() + base.len() / 5 + 8);
+        for (idx, (x, y)) in base.iter().copied().enumerate() {
+            points.push((x, y));
+            if idx % 9 == 0 {
+                points.push((x, y));
+            }
+            if idx % 17 == 0 {
+                // Near-equal x and slightly lower y: still legal after cleanup's max-output merge.
+                points.push((x + 1e-13 * (1.0 + x.abs()), y * (1.0 - 1e-12)));
+            }
+        }
+        points.shuffle(rng);
+        points
+    }
+
+    fn assert_curve_variants<F>(label: &str, max_input: f64, f: F, rng: &mut Pcg64) -> usize
+    where
+        F: Fn(f64) -> f64,
+    {
+        let grids = [
+            linear_grid(max_input, 161),
+            geometric_grid(max_input, 161),
+            clustered_grid(max_input, 161, 2.4),
+            clustered_grid(max_input, 161, 0.45),
+        ];
+
+        let mut checks = 0usize;
+        for (grid_idx, grid) in grids.iter().enumerate() {
+            let base: Vec<(f64, f64)> = grid.iter().map(|x| (*x, f(*x).max(0.0))).collect();
+            assert_valid(&base, &format!("{label} grid{grid_idx} sorted"));
+            checks += 1;
+
+            let mut reversed = base.clone();
+            reversed.reverse();
+            assert_valid(&reversed, &format!("{label} grid{grid_idx} reversed"));
+            checks += 1;
+
+            let noisy = duplicated_unsorted_variant(&base, rng);
+            assert_valid(&noisy, &format!("{label} grid{grid_idx} dup_unsorted"));
+            checks += 1;
+        }
+        checks
+    }
+
+    fn build_piecewise_concave_knots(rng: &mut Pcg64, max_input: f64) -> Vec<(f64, f64)> {
+        let n_segments = rng.gen_range(8..28);
+        let x0 = MIN_INPUT * 1.01;
+        let span = (max_input - x0).max(0.5);
+
+        let weights: Vec<f64> = (0..n_segments).map(|_| rng.gen_range(0.2..2.0)).collect();
+        let weight_sum: f64 = weights.iter().sum();
+
+        let mut slopes = Vec::with_capacity(n_segments);
+        let mut slope = rng.gen_range(0.01..2.5);
+        for _ in 0..n_segments {
+            slopes.push(slope);
+            slope *= rng.gen_range(0.35..0.99);
+        }
+
+        let mut knots = Vec::with_capacity(n_segments + 1);
+        let mut x = x0;
+        let mut y = 0.0;
+        knots.push((x, y));
+        for idx in 0..n_segments {
+            let dx = span * weights[idx] / weight_sum;
+            x += dx;
+            y += slopes[idx] * dx;
+            knots.push((x, y));
+        }
+        knots
+    }
+
+    fn eval_piecewise_linear(knots: &[(f64, f64)], x: f64) -> f64 {
+        if x <= knots[0].0 {
+            return knots[0].1;
+        }
+        for window in knots.windows(2) {
+            let (x0, y0) = window[0];
+            let (x1, y1) = window[1];
+            if x <= x1 {
+                let t = ((x - x0) / (x1 - x0)).clamp(0.0, 1.0);
+                return y0 + t * (y1 - y0);
+            }
+        }
+        knots.last().map(|(_, y)| *y).unwrap_or(0.0)
     }
 
     #[test]
@@ -137,6 +256,116 @@ mod tests {
             })
             .collect();
         assert_valid(&points, "quantized staircase");
+    }
+
+    #[test]
+    fn accepts_extensive_analytic_concave_monotone_family_matrix() {
+        let mut rng = Pcg64::seed_from_u64(0xA11CE5EED);
+        let mut checks = 0usize;
+
+        for case_idx in 0..360 {
+            let max_input = rng.gen_range(0.5..20_000.0);
+
+            let w_log = rng.gen_range(0.05..1.0);
+            let w_pow = rng.gen_range(0.05..1.0);
+            let w_exp = rng.gen_range(0.05..1.0);
+            let w_rat = rng.gen_range(0.05..1.0);
+            let w_asinh = rng.gen_range(0.05..1.0);
+            let w_sqrt = rng.gen_range(0.05..1.0);
+            let w_sum = w_log + w_pow + w_exp + w_rat + w_asinh + w_sqrt;
+
+            let a_log = rng.gen_range(1e-4..20.0);
+            let p_pow = rng.gen_range(0.08..0.98);
+            let b_pow = rng.gen_range(1e-3..150.0);
+            let k_exp = rng.gen_range(1e-4..5.0);
+            let b_rat = rng.gen_range(1e-4..200.0);
+            let k_asinh = rng.gen_range(1e-4..5.0);
+            let b_sqrt = rng.gen_range(1e-3..250.0);
+            let linear = rng.gen_range(0.0..0.05);
+
+            checks += assert_curve_variants(
+                &format!("analytic blend case {case_idx}"),
+                max_input,
+                |x| {
+                    let log_term = (1.0 + a_log * x).ln();
+                    let pow_term = (x + b_pow).powf(p_pow) - b_pow.powf(p_pow);
+                    let exp_term = 1.0 - (-k_exp * x).exp();
+                    let rat_term = x / (x + b_rat);
+                    let asinh_term = (k_asinh * x).asinh();
+                    let sqrt_term = (x + b_sqrt).sqrt() - b_sqrt.sqrt();
+
+                    let blended = w_log * log_term
+                        + w_pow * pow_term
+                        + w_exp * exp_term
+                        + w_rat * rat_term
+                        + w_asinh * asinh_term
+                        + w_sqrt * sqrt_term;
+                    (blended / w_sum + linear * x).max(0.0)
+                },
+                &mut rng,
+            );
+        }
+
+        assert!(
+            checks >= 4_000,
+            "expected a large stress matrix, got only {checks} checks"
+        );
+    }
+
+    #[test]
+    fn accepts_extensive_piecewise_linear_concave_monotone_family_matrix() {
+        let mut rng = Pcg64::seed_from_u64(0xBADC0FFE);
+        let mut checks = 0usize;
+
+        for case_idx in 0..360 {
+            let max_input = rng.gen_range(1.0..30_000.0);
+            let knots = build_piecewise_concave_knots(&mut rng, max_input);
+            checks += assert_curve_variants(
+                &format!("piecewise concave case {case_idx}"),
+                max_input,
+                |x| eval_piecewise_linear(&knots, x),
+                &mut rng,
+            );
+        }
+
+        assert!(
+            checks >= 4_000,
+            "expected a large stress matrix, got only {checks} checks"
+        );
+    }
+
+    #[test]
+    fn exposes_false_positive_from_cancellation_prone_concave_curve() {
+        // f(x) = sqrt(C + x) - sqrt(C) is monotone and concave for C > 0:
+        // f'(x) = 1 / (2*sqrt(C+x)) > 0, f''(x) = -1 / (4*(C+x)^(3/2)) < 0.
+        // With large C, naive evaluation suffers cancellation and can create flat-then-jump
+        // artifacts that trip the discrete slope-rise check.
+        let c: f64 = 1e16;
+        let xs = [
+            0.9628366933867734,
+            0.9828747494989979,
+            1.0029128056112224,
+            1.0229508617234468,
+        ];
+
+        let naive_points: Vec<(f64, f64)> = xs
+            .iter()
+            .map(|x| (*x, (c + *x).sqrt() - c.sqrt()))
+            .collect();
+        let err = submission_shape_violation(&naive_points, MIN_INPUT).expect(
+            "expected checker to flag cancellation-prone evaluation despite legal underlying shape",
+        );
+        assert!(err.contains("concavity"), "unexpected error: {err}");
+
+        // Equivalent stable form: sqrt(C+x)-sqrt(C) = x / (sqrt(C+x)+sqrt(C)).
+        let stable_points: Vec<(f64, f64)> = xs
+            .iter()
+            .map(|x| (*x, *x / ((c + *x).sqrt() + c.sqrt())))
+            .collect();
+        assert_valid(
+            &stable_points,
+            "stable algebraic form of same legal concave/monotone curve",
+        );
     }
 
     #[test]

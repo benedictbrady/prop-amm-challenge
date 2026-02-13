@@ -43,6 +43,15 @@ fn starter_after_swap(_data: &[u8], _storage: &mut [u8]) {
     // No-op: starter strategy doesn't update storage.
 }
 
+fn linear_swap(data: &[u8]) -> u64 {
+    if data.len() < 25 {
+        return 0;
+    }
+
+    let input_amount = u64::from_le_bytes(data[1..9].try_into().expect("linear input amount"));
+    input_amount
+}
+
 fn normalizer_exec() -> NativeExecutor {
     NativeExecutor::new(normalizer_swap, Some(normalizer_after_swap))
 }
@@ -156,6 +165,101 @@ fn test_convexity() {
             size
         );
         prev_marginal = marginal;
+    }
+}
+
+#[test]
+fn test_legacy_float_concavity_check_false_positive_for_linear_compute_swap() {
+    // This swap function is affine in input amount (y = x), so it is both monotone and concave.
+    // A legacy float-based finite-difference check can still fail because f64_to_nano(size + eps)
+    // is not always exactly +1_000_000 nanos larger than f64_to_nano(size).
+    let exec = NativeExecutor::new(linear_swap, None);
+    let rx = f64_to_nano(100.0);
+    let ry = f64_to_nano(10000.0);
+    let storage = [0u8; STORAGE_SIZE];
+
+    let trade_sizes = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0];
+    let eps = 0.001;
+
+    // Monotonicity in the same style as validate.rs.
+    let mut prev_output = 0u64;
+    for &size in &trade_sizes {
+        let output = exec.execute(0, f64_to_nano(size), rx, ry, &storage);
+        assert!(
+            output > prev_output || prev_output == 0,
+            "linear swap should be monotone at size {} ({} <= {})",
+            size,
+            output,
+            prev_output
+        );
+        prev_output = output;
+    }
+
+    // Show the truncation discontinuity that causes false-positive concavity failure.
+    assert_eq!(
+        f64_to_nano(1.0 + eps) - f64_to_nano(1.0),
+        999_999,
+        "expected 1.0 -> 1.001 nano delta to truncate to 999,999"
+    );
+    assert_eq!(
+        f64_to_nano(2.0 + eps) - f64_to_nano(2.0),
+        1_000_000,
+        "expected 2.0 -> 2.001 nano delta to truncate to 1,000,000"
+    );
+
+    // Concavity logic copied from validate.rs should trip despite linear shape.
+    let mut prev_marginal = f64::MAX;
+    let mut violation: Option<(f64, f64, f64)> = None;
+    for &size in &trade_sizes {
+        let out_lo = nano_to_f64(exec.execute(0, f64_to_nano(size), rx, ry, &storage));
+        let out_hi = nano_to_f64(exec.execute(0, f64_to_nano(size + eps), rx, ry, &storage));
+        let marginal = (out_hi - out_lo) / eps;
+        if marginal > prev_marginal + 1e-9 {
+            violation = Some((size, prev_marginal, marginal));
+            break;
+        }
+        prev_marginal = marginal;
+    }
+
+    let (size, prev, current) = violation.expect(
+        "expected validator-style concavity check to false-positive on linear compute_swap",
+    );
+    assert!(
+        (size - 2.0).abs() < 1e-12,
+        "expected first violation at size 2.0, got size={} (prev={}, current={})",
+        size,
+        prev,
+        current
+    );
+}
+
+#[test]
+fn test_integer_concavity_check_accepts_linear_compute_swap() {
+    let exec = NativeExecutor::new(linear_swap, None);
+    let rx = f64_to_nano(100.0);
+    let ry = f64_to_nano(10000.0);
+    let storage = [0u8; STORAGE_SIZE];
+    let trade_sizes = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0];
+    let delta_nano = 1_000_000u64;
+
+    for &size in &trade_sizes {
+        let in_0 = f64_to_nano(size);
+        let in_1 = in_0 + delta_nano;
+        let in_2 = in_1 + delta_nano;
+
+        let out_0 = exec.execute(0, in_0, rx, ry, &storage) as i128;
+        let out_1 = exec.execute(0, in_1, rx, ry, &storage) as i128;
+        let out_2 = exec.execute(0, in_2, rx, ry, &storage) as i128;
+        let step_1 = out_1 - out_0;
+        let step_2 = out_2 - out_1;
+
+        assert!(
+            step_2 <= step_1 + 1,
+            "integer concavity check should accept linear swap at size {} (step2={} > step1={})",
+            size,
+            step_2,
+            step_1
+        );
     }
 }
 
