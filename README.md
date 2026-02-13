@@ -61,9 +61,9 @@ There's no free lunch from slightly undercutting either. The optimal strategy de
 - Fee varies per simulation: `norm_fee_bps ~ U{30, 80}` (integer bps)
 - Liquidity varies per simulation: `norm_liquidity_mult ~ U[0.4, 2.0]`
 
-**Arbitrage**: Golden-section search for the optimal trade size that maximizes arbitrage profit (then execute only if it clears a minimum profit floor). The search is early-stopped once the trade size is within ~5% (relative bracket width). Trades are skipped unless expected arb profit is at least `0.01` Y (1 cent).
+**Arbitrage**: Golden-section search for the optimal trade size that maximizes arbitrage profit (then execute only if it clears a minimum profit floor). The search is early-stopped once the trade size is within ~1% (relative bracket width). Trades are skipped unless expected arb profit is at least `0.01` Y (1 cent).
 
-**Order routing**: Golden-section search over split ratio alpha in [0, 1]. The router picks the split that maximizes total output, and early-stops once the objective is within ~1% between probe points. Small pricing differences can shift large fractions of volume.
+**Order routing**: Golden-section search over split ratio alpha in [0, 1]. The router picks the split that maximizes total output, and early-stops once the submission trade amount is within ~1% (relative bracket width, with an additional 1% objective-gap stop). Small pricing differences can shift large fractions of volume.
 
 ### Edge
 
