@@ -6,6 +6,8 @@ const OUTPUT_REL_TOL: f64 = 1e-9;
 const OUTPUT_ABS_TOL: f64 = 1e-9;
 const SLOPE_REL_TOL: f64 = 1e-2;
 const SLOPE_ABS_TOL: f64 = 1e-8;
+// Ignore concavity checks on tiny input deltas that are dominated by nano-quantization.
+const MIN_SLOPE_DX: f64 = 0.01;
 
 pub(crate) fn enforce_submission_monotonic_concave(
     amm_name: &str,
@@ -63,7 +65,7 @@ fn submission_shape_violation(points: &[(f64, f64)], min_input: f64) -> Option<S
         let (in_a, out_a) = window[0];
         let (in_b, out_b) = window[1];
         let dx = in_b - in_a;
-        if dx <= X_ABS_EPS {
+        if dx <= MIN_SLOPE_DX {
             continue;
         }
         let slope = (out_b - out_a) / dx;
