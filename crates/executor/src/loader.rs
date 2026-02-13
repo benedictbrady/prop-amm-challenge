@@ -8,8 +8,8 @@ use solana_rbpf::{
 };
 
 use crate::syscalls::{
-    SyscallAbort, SyscallContext, SyscallLog, SyscallMemcpy, SyscallMemset,
-    SyscallSetReturnData, SyscallSetStorage,
+    SyscallAbort, SyscallContext, SyscallLog, SyscallMemcmp, SyscallMemcpy, SyscallMemmove,
+    SyscallMemset, SyscallSetReturnData, SyscallSetStorage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +53,12 @@ impl BpfProgram {
             .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
         function_registry
             .register_function_hashed(*b"sol_memcpy_", SyscallMemcpy::vm)
+            .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
+        function_registry
+            .register_function_hashed(*b"sol_memmove_", SyscallMemmove::vm)
+            .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
+        function_registry
+            .register_function_hashed(*b"sol_memcmp_", SyscallMemcmp::vm)
             .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
         function_registry
             .register_function_hashed(*b"sol_memset_", SyscallMemset::vm)

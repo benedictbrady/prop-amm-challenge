@@ -132,11 +132,89 @@ declare_builtin_function!(
             memory_mapping.map(AccessType::Store, dst_addr, n).into();
         let dst_host = dst_host?;
         unsafe {
-            std::ptr::copy_nonoverlapping(
+            // Use overlap-safe copy to avoid host UB on malformed guest calls.
+            std::ptr::copy(
                 src_host as *const u8,
                 dst_host as *mut u8,
                 n as usize,
             );
+        }
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// Memory move: sol_memmove_(dst, src, n)
+    SyscallMemmove,
+    fn rust(
+        _context_object: &mut SyscallContext,
+        dst_addr: u64,
+        src_addr: u64,
+        n: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        if n == 0 {
+            return Ok(0);
+        }
+        let src_host: Result<u64, EbpfError> =
+            memory_mapping.map(AccessType::Load, src_addr, n).into();
+        let src_host = src_host?;
+        let dst_host: Result<u64, EbpfError> =
+            memory_mapping.map(AccessType::Store, dst_addr, n).into();
+        let dst_host = dst_host?;
+        unsafe {
+            std::ptr::copy(src_host as *const u8, dst_host as *mut u8, n as usize);
+        }
+        Ok(0)
+    }
+);
+
+declare_builtin_function!(
+    /// Memory compare: sol_memcmp_(s1, s2, n, result_ptr)
+    SyscallMemcmp,
+    fn rust(
+        _context_object: &mut SyscallContext,
+        s1_addr: u64,
+        s2_addr: u64,
+        n: u64,
+        result_addr: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        let cmp = if n == 0 {
+            0i32
+        } else {
+            let s1_host: Result<u64, EbpfError> =
+                memory_mapping.map(AccessType::Load, s1_addr, n).into();
+            let s1_host = s1_host?;
+            let s2_host: Result<u64, EbpfError> =
+                memory_mapping.map(AccessType::Load, s2_addr, n).into();
+            let s2_host = s2_host?;
+
+            let s1 = unsafe { std::slice::from_raw_parts(s1_host as *const u8, n as usize) };
+            let s2 = unsafe { std::slice::from_raw_parts(s2_host as *const u8, n as usize) };
+            let mut out = 0i32;
+            for (&a, &b) in s1.iter().zip(s2.iter()) {
+                if a != b {
+                    out = (a as i32) - (b as i32);
+                    break;
+                }
+            }
+            out
+        };
+
+        let result_host: Result<u64, EbpfError> = memory_mapping
+            .map(
+                AccessType::Store,
+                result_addr,
+                core::mem::size_of::<i32>() as u64,
+            )
+            .into();
+        let result_host = result_host?;
+        unsafe {
+            std::ptr::write_unaligned(result_host as *mut i32, cmp);
         }
         Ok(0)
     }
