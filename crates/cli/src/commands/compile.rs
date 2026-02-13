@@ -1,7 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
-const BUILD_DIR: &str = ".build";
+const BUILD_RUNS_DIR: &str = ".build/runs";
 const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]\n";
 
 const CARGO_TOML: &str = r#"[package]
@@ -21,17 +25,40 @@ prop-amm-submission-sdk = { path = "../crates/submission-sdk" }
 no-entrypoint = []
 "#;
 
-pub fn ensure_build_dir() -> anyhow::Result<PathBuf> {
-    let build_dir = PathBuf::from(BUILD_DIR);
+fn cargo_toml_with_sdk_path() -> String {
+    CARGO_TOML.replace(
+        "path = \"../crates/submission-sdk\"",
+        "path = \"../../../crates/submission-sdk\"",
+    )
+}
+
+pub fn ensure_build_dir(safe_source: &str) -> anyhow::Result<PathBuf> {
+    let mut hasher = DefaultHasher::new();
+    safe_source.hash(&mut hasher);
+    CARGO_TOML.hash(&mut hasher);
+    let build_key = format!("{:016x}", hasher.finish());
+
+    let build_dir = PathBuf::from(BUILD_RUNS_DIR).join(build_key);
     std::fs::create_dir_all(build_dir.join("src"))?;
 
+    let cargo_toml = cargo_toml_with_sdk_path();
     let cargo_path = build_dir.join("Cargo.toml");
     let should_write = match std::fs::read_to_string(&cargo_path) {
-        Ok(existing) => existing != CARGO_TOML,
+        Ok(existing) => existing != cargo_toml,
         Err(_) => true,
     };
     if should_write {
-        std::fs::write(&cargo_path, CARGO_TOML)?;
+        std::fs::write(&cargo_path, cargo_toml)?;
+    }
+
+    let source_path = build_dir.join("src/lib.rs");
+    let source_bytes = safe_source.as_bytes();
+    let should_write_source = match std::fs::read(&source_path) {
+        Ok(existing) => existing != source_bytes,
+        Err(_) => true,
+    };
+    if should_write_source {
+        std::fs::write(source_path, source_bytes)?;
     }
 
     Ok(build_dir)
@@ -43,8 +70,8 @@ pub fn compile_native(rs_file: &str) -> anyhow::Result<PathBuf> {
         anyhow::bail!("File not found: {}", rs_file);
     }
 
-    let build_dir = ensure_build_dir()?;
-    write_safe_submission_source(rs_path, &build_dir)?;
+    let safe_source = make_safe_submission_source(rs_path)?;
+    let build_dir = ensure_build_dir(&safe_source)?;
 
     let status = Command::new("cargo")
         .arg("build")
@@ -68,8 +95,8 @@ pub fn compile_bpf(rs_file: &str) -> anyhow::Result<PathBuf> {
         anyhow::bail!("File not found: {}", rs_file);
     }
 
-    let build_dir = ensure_build_dir()?;
-    write_safe_submission_source(rs_path, &build_dir)?;
+    let safe_source = make_safe_submission_source(rs_path)?;
+    let build_dir = ensure_build_dir(&safe_source)?;
 
     let status = Command::new("cargo")
         .arg("build-sbf")
@@ -108,9 +135,9 @@ fn find_native_lib(build_dir: &Path) -> anyhow::Result<PathBuf> {
     )
 }
 
-fn write_safe_submission_source(rs_path: &Path, build_dir: &Path) -> anyhow::Result<()> {
+fn make_safe_submission_source(rs_path: &Path) -> anyhow::Result<String> {
     let source = std::fs::read_to_string(rs_path)?;
-    let output = if source.starts_with(FORBID_UNSAFE) {
+    let safe_source = if source.starts_with(FORBID_UNSAFE) {
         source
     } else {
         let mut wrapped = String::with_capacity(FORBID_UNSAFE.len() + source.len());
@@ -119,8 +146,7 @@ fn write_safe_submission_source(rs_path: &Path, build_dir: &Path) -> anyhow::Res
         wrapped
     };
 
-    std::fs::write(build_dir.join("src/lib.rs"), output)?;
-    Ok(())
+    Ok(safe_source)
 }
 
 fn find_bpf_so(build_dir: &Path) -> anyhow::Result<PathBuf> {
