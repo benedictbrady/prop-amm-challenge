@@ -126,6 +126,7 @@ To persist updated storage, call the `sol_set_storage` syscall with your modifie
 |---------------|--------------------------------------------------------------------|
 | **NAME**      | Must define `const NAME: &str = "...";` — shown on the leaderboard. |
 | **Monotonic** | Larger input must produce larger output.                           |
+| **Concave**   | Output must be concave in input (diminishing returns per unit).    |
 | **< 100k CU** | Must execute within the compute unit limit.                       |
 
 ## Writing a Program
