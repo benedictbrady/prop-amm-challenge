@@ -15,7 +15,7 @@ const BRACKET_MAX_STEPS: usize = 24;
 const BRACKET_GROWTH: f64 = 2.0;
 const MAX_INPUT_AMOUNT: f64 = (u64::MAX as f64 / NANO_SCALE_F64) * 0.999_999;
 // Ignore micro-arbs by requiring a minimum quote-token (Y) notional.
-const MIN_ARB_NOTIONAL_Y: f64 = 0.05;
+const MIN_ARB_NOTIONAL_Y: f64 = 0.01;
 
 #[derive(Clone, Copy)]
 enum ArbSide {
@@ -543,10 +543,10 @@ mod tests {
             return 0;
         }
         let output = match side {
-            // Profitable for tiny buys (< 0.05 Y), unprofitable at/above the floor.
+            // Profitable for tiny buys (< 0.01 Y), unprofitable at/above the floor.
             0 => {
-                if input < 0.05 {
-                    input / 50.0
+                if input < 0.01 {
+                    input / 10.0
                 } else {
                     input / 120.0
                 }
@@ -647,8 +647,8 @@ mod tests {
             10_000.0,
             "test".to_string(),
         );
-        let small_profit = amm.quote_buy_x(0.04) * fair_price - 0.04;
-        let floor_profit = amm.quote_buy_x(0.05) * fair_price - 0.05;
+        let small_profit = amm.quote_buy_x(0.005) * fair_price - 0.005;
+        let floor_profit = amm.quote_buy_x(0.01) * fair_price - 0.01;
         assert!(
             small_profit > 0.01,
             "sub-floor trade should be profitable above arb threshold"
@@ -658,7 +658,7 @@ mod tests {
         let mut arb = Arbitrageur::new(0.01, 20.0, 1.2, 1234);
         assert!(
             arb.execute_arb(&mut amm, fair_price).is_none(),
-            "arb should ignore opportunities below 0.05 Y notional floor"
+            "arb should ignore opportunities below 0.01 Y notional floor"
         );
     }
 }
