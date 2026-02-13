@@ -14,6 +14,8 @@ const GOLDEN_INPUT_REL_TOL: f64 = 1e-2;
 const BRACKET_MAX_STEPS: usize = 24;
 const BRACKET_GROWTH: f64 = 2.0;
 const MAX_INPUT_AMOUNT: f64 = (u64::MAX as f64 / NANO_SCALE_F64) * 0.999_999;
+// Ignore micro-arbs by requiring a minimum quote-token (Y) notional.
+const MIN_ARB_NOTIONAL_Y: f64 = 0.05;
 
 #[derive(Clone, Copy)]
 enum ArbSide {
@@ -72,13 +74,18 @@ impl Arbitrageur {
         } else {
             // Evaluate both book sides from compute_swap quotes; reserve_y/reserve_x can be a
             // misleading directional signal for non-CP strategies.
-            let start_y = self.sample_retail_size_y().min(MAX_INPUT_AMOUNT);
+            let min_buy_input = Self::min_buy_input_y();
+            let min_sell_input = Self::min_sell_input_x(fair_price);
+            let start_y = self
+                .sample_retail_size_y()
+                .max(min_buy_input)
+                .min(MAX_INPUT_AMOUNT);
             let start_x = (start_y / fair_price.max(1e-9))
-                .max(MIN_INPUT)
+                .max(min_sell_input)
                 .min(MAX_INPUT_AMOUNT);
             Self::best_candidate(
-                self.plan_arb_buy_x(amm, fair_price, start_y),
-                self.plan_arb_sell_x(amm, fair_price, start_x),
+                self.plan_arb_buy_x(amm, fair_price, start_y, min_buy_input),
+                self.plan_arb_sell_x(amm, fair_price, start_x, min_sell_input),
             )
         }?;
 
@@ -87,6 +94,16 @@ impl Arbitrageur {
 
     fn sample_retail_size_y(&mut self) -> f64 {
         self.retail_size_dist.sample(&mut self.rng).max(MIN_INPUT)
+    }
+
+    #[inline]
+    fn min_buy_input_y() -> f64 {
+        MIN_INPUT.max(MIN_ARB_NOTIONAL_Y)
+    }
+
+    #[inline]
+    fn min_sell_input_x(fair_price: f64) -> f64 {
+        MIN_INPUT.max(MIN_ARB_NOTIONAL_Y / fair_price.max(1e-9))
     }
 
     fn plan_normalizer_buy_x(&self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbCandidate> {
@@ -109,7 +126,8 @@ impl Arbitrageur {
         if !target.is_finite() || target <= ry {
             None
         } else {
-            let input_y = ((target - ry) / gamma).clamp(MIN_INPUT, MAX_INPUT_AMOUNT);
+            let min_buy_input = Self::min_buy_input_y();
+            let input_y = ((target - ry) / gamma).clamp(min_buy_input, MAX_INPUT_AMOUNT);
             let expected_output_x = amm.quote_buy_x(input_y);
             if expected_output_x <= 0.0 {
                 return None;
@@ -146,7 +164,8 @@ impl Arbitrageur {
         if !target.is_finite() || target <= rx {
             None
         } else {
-            let input_x = ((target - rx) / gamma).clamp(MIN_INPUT, MAX_INPUT_AMOUNT);
+            let min_sell_input = Self::min_sell_input_x(fair_price);
+            let input_x = ((target - rx) / gamma).clamp(min_sell_input, MAX_INPUT_AMOUNT);
             let expected_output_y = amm.quote_sell_x(input_x);
             if expected_output_y <= 0.0 {
                 return None;
@@ -184,9 +203,10 @@ impl Arbitrageur {
         amm: &mut BpfAmm,
         fair_price: f64,
         start_y: f64,
+        min_buy_input: f64,
     ) -> Option<ArbCandidate> {
         let mut sampled_curve = Vec::with_capacity(BRACKET_MAX_STEPS + GOLDEN_MAX_ITERS + 8);
-        let (lo, hi) = Self::bracket_maximum(start_y, MAX_INPUT_AMOUNT, |input_y| {
+        let (lo, hi) = Self::bracket_maximum(start_y, min_buy_input, MAX_INPUT_AMOUNT, |input_y| {
             let output_x = amm.quote_buy_x(input_y);
             sampled_curve.push((input_y, output_x));
             output_x * fair_price - input_y
@@ -199,11 +219,11 @@ impl Arbitrageur {
         curve_checks::enforce_submission_monotonic_concave(
             &amm.name,
             &sampled_curve,
-            MIN_INPUT,
+            min_buy_input,
             "arbitrage buy search",
         );
 
-        if optimal_y < MIN_INPUT {
+        if optimal_y < min_buy_input {
             return None;
         }
 
@@ -229,9 +249,11 @@ impl Arbitrageur {
         amm: &mut BpfAmm,
         fair_price: f64,
         start_x: f64,
+        min_sell_input: f64,
     ) -> Option<ArbCandidate> {
         let mut sampled_curve = Vec::with_capacity(BRACKET_MAX_STEPS + GOLDEN_MAX_ITERS + 8);
-        let (lo, hi) = Self::bracket_maximum(start_x, MAX_INPUT_AMOUNT, |input_x| {
+        let (lo, hi) =
+            Self::bracket_maximum(start_x, min_sell_input, MAX_INPUT_AMOUNT, |input_x| {
             let output_y = amm.quote_sell_x(input_x);
             sampled_curve.push((input_x, output_y));
             output_y - input_x * fair_price
@@ -244,11 +266,11 @@ impl Arbitrageur {
         curve_checks::enforce_submission_monotonic_concave(
             &amm.name,
             &sampled_curve,
-            MIN_INPUT,
+            min_sell_input,
             "arbitrage sell search",
         );
 
-        if optimal_x < MIN_INPUT {
+        if optimal_x < min_sell_input {
             return None;
         }
 
@@ -321,14 +343,20 @@ impl Arbitrageur {
         }
     }
 
-    fn bracket_maximum<F>(start: f64, max_input: f64, mut objective: F) -> (f64, f64)
+    fn bracket_maximum<F>(
+        start: f64,
+        min_input: f64,
+        max_input: f64,
+        mut objective: F,
+    ) -> (f64, f64)
     where
         F: FnMut(f64) -> f64,
     {
         search_stats::inc_arb_bracket_call();
-        let mut lo = 0.0_f64;
-        let max_input = max_input.max(MIN_INPUT);
-        let mut mid = start.clamp(MIN_INPUT, max_input);
+        let min_input = min_input.max(MIN_INPUT);
+        let mut lo = min_input;
+        let max_input = max_input.max(min_input);
+        let mut mid = start.clamp(min_input, max_input);
         search_stats::inc_arb_bracket_eval();
         let mut mid_value = Self::sanitize_score(objective(mid));
 
@@ -505,6 +533,31 @@ mod tests {
         linear_quote_swap(data, 99.0, 120.0)
     }
 
+    fn subfloor_buy_only_swap(data: &[u8]) -> u64 {
+        if data.len() < 25 {
+            return 0;
+        }
+        let side = data[0];
+        let input = u64::from_le_bytes(data[1..9].try_into().expect("input")) as f64 / NANO_SCALE;
+        if !input.is_finite() || input <= 0.0 {
+            return 0;
+        }
+        let output = match side {
+            // Profitable for tiny buys (< 0.05 Y), unprofitable at/above the floor.
+            0 => {
+                if input < 0.05 {
+                    input / 50.0
+                } else {
+                    input / 120.0
+                }
+            }
+            // Never profitable on sell side.
+            1 => 0.0,
+            _ => 0.0,
+        };
+        to_nano_u64(output)
+    }
+
     #[test]
     fn min_arb_profit_blocks_profitable_trade_when_threshold_is_higher() {
         let fair_price = 101.0;
@@ -581,6 +634,31 @@ mod tests {
         assert!(
             result.amm_buys_x,
             "arb should choose sell-X side with higher expected profit"
+        );
+    }
+
+    #[test]
+    fn ignores_profitable_subfloor_buy_arbs() {
+        let fair_price = 100.0;
+        let mut amm = BpfAmm::new_native(
+            subfloor_buy_only_swap,
+            None,
+            100.0,
+            10_000.0,
+            "test".to_string(),
+        );
+        let small_profit = amm.quote_buy_x(0.04) * fair_price - 0.04;
+        let floor_profit = amm.quote_buy_x(0.05) * fair_price - 0.05;
+        assert!(
+            small_profit > 0.01,
+            "sub-floor trade should be profitable above arb threshold"
+        );
+        assert!(floor_profit <= 0.0, "at-floor trade should be unprofitable");
+
+        let mut arb = Arbitrageur::new(0.01, 20.0, 1.2, 1234);
+        assert!(
+            arb.execute_arb(&mut amm, fair_price).is_none(),
+            "arb should ignore opportunities below 0.05 Y notional floor"
         );
     }
 }
