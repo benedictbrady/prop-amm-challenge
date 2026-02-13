@@ -1,5 +1,6 @@
 use crate::amm::BpfAmm;
 use crate::retail::RetailOrder;
+use crate::search_stats;
 
 pub struct RoutedTrade {
     pub is_submission: bool,
@@ -12,6 +13,8 @@ const MIN_TRADE_SIZE: f64 = 0.001;
 const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_8;
 const GOLDEN_MAX_ITERS: usize = 14;
 const GOLDEN_ALPHA_TOL: f64 = 1e-3;
+// Stop once the two evaluated total outputs are within 1% of each other.
+const GOLDEN_SCORE_REL_GAP_TOL: f64 = 1e-2;
 
 pub struct OrderRouter;
 
@@ -198,11 +201,14 @@ impl OrderRouter {
     where
         F: FnMut(f64) -> QuotePoint,
     {
+        search_stats::inc_router_call();
         let mut sampled = Vec::with_capacity(GOLDEN_MAX_ITERS + 6);
         let mut left = 0.0_f64;
         let mut right = 1.0_f64;
 
+        search_stats::inc_router_eval();
         let edge_left = evaluate(left);
+        search_stats::inc_router_eval();
         let edge_right = evaluate(right);
         sampled.push(edge_left);
         sampled.push(edge_right);
@@ -210,7 +216,9 @@ impl OrderRouter {
 
         let mut x1 = right - GOLDEN_RATIO_CONJUGATE * (right - left);
         let mut x2 = left + GOLDEN_RATIO_CONJUGATE * (right - left);
+        search_stats::inc_router_eval();
         let mut q1 = evaluate(x1);
+        search_stats::inc_router_eval();
         let mut q2 = evaluate(x2);
         sampled.push(q1);
         sampled.push(q2);
@@ -218,7 +226,17 @@ impl OrderRouter {
         best = Self::best_quote(best, q2);
 
         for _ in 0..GOLDEN_MAX_ITERS {
+            search_stats::inc_router_iter();
             if right - left <= GOLDEN_ALPHA_TOL {
+                break;
+            }
+
+            if Self::within_rel_gap(
+                Self::quote_score(&q1),
+                Self::quote_score(&q2),
+                GOLDEN_SCORE_REL_GAP_TOL,
+            ) {
+                search_stats::inc_router_early_stop_rel_gap();
                 break;
             }
 
@@ -227,6 +245,7 @@ impl OrderRouter {
                 x1 = x2;
                 q1 = q2;
                 x2 = left + GOLDEN_RATIO_CONJUGATE * (right - left);
+                search_stats::inc_router_eval();
                 q2 = evaluate(x2);
                 sampled.push(q2);
                 best = Self::best_quote(best, q2);
@@ -235,12 +254,14 @@ impl OrderRouter {
                 x2 = x1;
                 q2 = q1;
                 x1 = right - GOLDEN_RATIO_CONJUGATE * (right - left);
+                search_stats::inc_router_eval();
                 q1 = evaluate(x1);
                 sampled.push(q1);
                 best = Self::best_quote(best, q1);
             }
         }
 
+        search_stats::inc_router_eval();
         let center = evaluate((left + right) * 0.5);
         sampled.push(center);
         best = Self::best_quote(best, center);
@@ -256,6 +277,15 @@ impl OrderRouter {
         } else {
             f64::NEG_INFINITY
         }
+    }
+
+    #[inline]
+    fn within_rel_gap(a: f64, b: f64, rel_tol: f64) -> bool {
+        if !a.is_finite() || !b.is_finite() {
+            return false;
+        }
+        let denom = a.abs().max(b.abs()).max(1e-12);
+        (a - b).abs() <= rel_tol * denom
     }
 
     #[inline]
@@ -308,8 +338,9 @@ mod tests {
     use rand_pcg::Pcg64;
 
     const BRUTE_FORCE_STEPS: usize = 4000;
-    const DIVERSE_CURVE_TOLERANCE: f64 = 8.0e-4;
-    const ENDPOINT_REGIME_TOLERANCE: f64 = 1.5e-3;
+    // Router search is intentionally approximate for speed; 1% relative error is acceptable.
+    const DIVERSE_CURVE_TOLERANCE: f64 = 1.0e-2;
+    const ENDPOINT_REGIME_TOLERANCE: f64 = 1.0e-2;
 
     fn cp_fee_swap(data: &[u8], fee_numerator: u128, fee_denominator: u128) -> u64 {
         if data.len() < 25 {

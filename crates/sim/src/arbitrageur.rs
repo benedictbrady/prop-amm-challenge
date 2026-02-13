@@ -1,4 +1,5 @@
 use crate::amm::BpfAmm;
+use crate::search_stats;
 use prop_amm_shared::nano::NANO_SCALE_F64;
 use rand::SeedableRng;
 use rand_distr::{Distribution, LogNormal};
@@ -6,8 +7,9 @@ use rand_pcg::Pcg64;
 
 const MIN_INPUT: f64 = 0.001;
 const GOLDEN_RATIO_CONJUGATE: f64 = 0.618_033_988_749_894_8;
-const GOLDEN_MAX_ITERS: usize = 24;
-const GOLDEN_REL_TOL: f64 = 1e-6;
+const GOLDEN_MAX_ITERS: usize = 12;
+// Stop once the bracket is narrow enough that the trade size is within ~5%.
+const GOLDEN_INPUT_REL_TOL: f64 = 5e-2;
 const BRACKET_MAX_STEPS: usize = 24;
 const BRACKET_GROWTH: f64 = 2.0;
 const MAX_INPUT_AMOUNT: f64 = (u64::MAX as f64 / NANO_SCALE_F64) * 0.999_999;
@@ -47,6 +49,12 @@ impl Arbitrageur {
             return None;
         }
 
+        // The normalizer is a known constant-product-with-fee curve. Arb it with a closed-form
+        // solution to avoid dozens of quote calls per step.
+        if amm.name == "normalizer" {
+            return self.execute_normalizer_closed_form(amm, fair_price, spot);
+        }
+
         if spot < fair_price * 0.9999 {
             self.arb_buy_x(amm, fair_price)
         } else if spot > fair_price * 1.0001 {
@@ -58,6 +66,93 @@ impl Arbitrageur {
 
     fn sample_retail_size_y(&mut self) -> f64 {
         self.retail_size_dist.sample(&mut self.rng).max(MIN_INPUT)
+    }
+
+    fn execute_normalizer_closed_form(
+        &mut self,
+        amm: &mut BpfAmm,
+        fair_price: f64,
+        spot: f64,
+    ) -> Option<ArbResult> {
+        debug_assert_eq!(amm.name, "normalizer");
+
+        let fee_bps = Self::normalizer_fee_bps(amm) as f64;
+        let gamma = (10_000.0 - fee_bps) / 10_000.0;
+        if !gamma.is_finite() || gamma <= 0.0 {
+            return None;
+        }
+
+        let rx = amm.reserve_x;
+        let ry = amm.reserve_y;
+        if !rx.is_finite() || !ry.is_finite() || rx <= 0.0 || ry <= 0.0 {
+            return None;
+        }
+
+        if spot < fair_price * 0.9999 {
+            // Buy X with Y
+            let target = (fair_price * rx * gamma * ry).sqrt();
+            if !target.is_finite() || target <= ry {
+                return None;
+            }
+            let input_y = ((target - ry) / gamma).clamp(MIN_INPUT, MAX_INPUT_AMOUNT);
+            let expected_output_x = amm.quote_buy_x(input_y);
+            if expected_output_x <= 0.0 {
+                return None;
+            }
+            let arb_profit = expected_output_x * fair_price - input_y;
+            if arb_profit < self.min_arb_profit {
+                return None;
+            }
+            let output_x = amm.execute_buy_x(input_y);
+            if output_x <= 0.0 {
+                return None;
+            }
+            Some(ArbResult {
+                amm_buys_x: false,
+                amount_x: output_x,
+                amount_y: input_y,
+                edge: input_y - output_x * fair_price,
+            })
+        } else if spot > fair_price * 1.0001 {
+            // Sell X for Y
+            let target = (ry * rx * gamma / fair_price).sqrt();
+            if !target.is_finite() || target <= rx {
+                return None;
+            }
+            let input_x = ((target - rx) / gamma).clamp(MIN_INPUT, MAX_INPUT_AMOUNT);
+            let expected_output_y = amm.quote_sell_x(input_x);
+            if expected_output_y <= 0.0 {
+                return None;
+            }
+            let arb_profit = expected_output_y - input_x * fair_price;
+            if arb_profit < self.min_arb_profit {
+                return None;
+            }
+            let output_y = amm.execute_sell_x(input_x);
+            if output_y <= 0.0 {
+                return None;
+            }
+            Some(ArbResult {
+                amm_buys_x: true,
+                amount_x: input_x,
+                amount_y: output_y,
+                edge: input_x * fair_price - output_y,
+            })
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn normalizer_fee_bps(amm: &BpfAmm) -> u16 {
+        // normalizer::compute_swap reads fee_bps from data[25..27], i.e. storage[0..2].
+        let s = amm.storage();
+        if s.len() >= 2 {
+            let raw = u16::from_le_bytes([s[0], s[1]]);
+            if raw == 0 { 30 } else { raw }
+        } else {
+            30
+        }
     }
 
     fn arb_buy_x(&mut self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbResult> {
@@ -150,9 +245,11 @@ impl Arbitrageur {
     where
         F: FnMut(f64) -> f64,
     {
+        search_stats::inc_arb_bracket_call();
         let mut lo = 0.0_f64;
         let max_input = max_input.max(MIN_INPUT);
         let mut mid = start.clamp(MIN_INPUT, max_input);
+        search_stats::inc_arb_bracket_eval();
         let mut mid_value = Self::sanitize_score(objective(mid));
 
         // Profit at zero input is always zero.
@@ -164,6 +261,7 @@ impl Arbitrageur {
         if hi <= mid {
             return (lo, mid);
         }
+        search_stats::inc_arb_bracket_eval();
         let mut hi_value = Self::sanitize_score(objective(hi));
 
         for _ in 0..BRACKET_MAX_STEPS {
@@ -180,6 +278,7 @@ impl Arbitrageur {
                 return (lo, hi);
             }
             hi = next_hi;
+            search_stats::inc_arb_bracket_eval();
             hi_value = Self::sanitize_score(objective(hi));
         }
 
@@ -190,16 +289,20 @@ impl Arbitrageur {
     where
         F: FnMut(f64) -> f64,
     {
+        search_stats::inc_arb_golden_call();
         let mut left = lo.min(hi).max(0.0);
         let mut right = hi.max(lo).max(MIN_INPUT);
 
         if right <= left {
+            search_stats::inc_arb_golden_eval();
             let value = Self::sanitize_score(objective(right));
             return (right, value);
         }
 
         let mut best_x = left;
+        search_stats::inc_arb_golden_eval();
         let mut best_value = Self::sanitize_score(objective(left));
+        search_stats::inc_arb_golden_eval();
         let right_value = Self::sanitize_score(objective(right));
         if right_value > best_value {
             best_x = right;
@@ -208,7 +311,9 @@ impl Arbitrageur {
 
         let mut x1 = right - GOLDEN_RATIO_CONJUGATE * (right - left);
         let mut x2 = left + GOLDEN_RATIO_CONJUGATE * (right - left);
+        search_stats::inc_arb_golden_eval();
         let mut f1 = Self::sanitize_score(objective(x1));
+        search_stats::inc_arb_golden_eval();
         let mut f2 = Self::sanitize_score(objective(x2));
         if f1 > best_value {
             best_x = x1;
@@ -220,11 +325,13 @@ impl Arbitrageur {
         }
 
         for _ in 0..GOLDEN_MAX_ITERS {
+            search_stats::inc_arb_golden_iter();
             if f1 < f2 {
                 left = x1;
                 x1 = x2;
                 f1 = f2;
                 x2 = left + GOLDEN_RATIO_CONJUGATE * (right - left);
+                search_stats::inc_arb_golden_eval();
                 f2 = Self::sanitize_score(objective(x2));
                 if f2 > best_value {
                     best_x = x2;
@@ -235,6 +342,7 @@ impl Arbitrageur {
                 x2 = x1;
                 f2 = f1;
                 x1 = right - GOLDEN_RATIO_CONJUGATE * (right - left);
+                search_stats::inc_arb_golden_eval();
                 f1 = Self::sanitize_score(objective(x1));
                 if f1 > best_value {
                     best_x = x1;
@@ -242,18 +350,18 @@ impl Arbitrageur {
                 }
             }
 
-            if (right - left) <= GOLDEN_REL_TOL * (1.0 + left + right) {
+            // Use bracket width in x-space as the stopping condition: we care about sizing
+            // the trade, not precisely maximizing profit.
+            let mid = 0.5 * (left + right);
+            let denom = mid.abs().max(MIN_INPUT);
+            if (right - left) <= GOLDEN_INPUT_REL_TOL * denom {
+                search_stats::inc_arb_early_stop_amount_tol();
                 break;
             }
         }
 
-        let center = 0.5 * (left + right);
-        let center_value = Self::sanitize_score(objective(center));
-        if center_value > best_value {
-            (center, center_value)
-        } else {
-            (best_x, best_value)
-        }
+        // With loose tolerances, a final center evaluation is rarely worth another quote call.
+        (best_x, best_value)
     }
 
     #[inline]

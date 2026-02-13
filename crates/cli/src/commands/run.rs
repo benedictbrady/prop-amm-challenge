@@ -33,11 +33,12 @@ pub fn run(
     steps: u32,
     workers: usize,
     bpf: bool,
+    bpf_so: Option<&str>,
 ) -> anyhow::Result<()> {
     let n_workers = if workers == 0 { None } else { Some(workers) };
 
     if bpf {
-        run_bpf(file, simulations, steps, n_workers)
+        run_bpf(file, simulations, steps, n_workers, bpf_so)
     } else {
         run_native(file, simulations, steps, n_workers)
     }
@@ -103,17 +104,25 @@ fn run_bpf(
     simulations: u32,
     steps: u32,
     n_workers: Option<usize>,
+    bpf_so: Option<&str>,
 ) -> anyhow::Result<()> {
-    println!("Compiling {} (BPF)...", file);
-    let bpf_path = compile::compile_bpf(file)?;
+    let bpf_path = if let Some(path) = bpf_so {
+        println!("Using prebuilt BPF .so: {}", path);
+        std::path::PathBuf::from(path)
+    } else {
+        println!("Compiling {} (BPF)...", file);
+        compile::compile_bpf(file)?
+    };
 
     let bytes = std::fs::read(&bpf_path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", bpf_path.display(), e))?;
     let submission_program = BpfProgram::load(&bytes)
         .map_err(|e| anyhow::anyhow!("Failed to load BPF program: {}", e))?;
 
+    let meter_disabled = std::env::var_os("PROP_AMM_BPF_DISABLE_METER").is_some();
+
     println!(
-        "Running {} simulations ({} steps each) via BPF{}...",
+        "Running {} simulations ({} steps each) via BPF{}{}...",
         simulations,
         steps,
         if submission_program.jit_available() {
@@ -121,6 +130,7 @@ fn run_bpf(
         } else {
             " (interpreter)"
         },
+        if meter_disabled { " (no meter)" } else { "" },
     );
 
     let start = std::time::Instant::now();

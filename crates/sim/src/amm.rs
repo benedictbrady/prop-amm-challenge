@@ -223,6 +223,11 @@ impl BpfAmm {
         self.storage[..n].copy_from_slice(&bytes[..n]);
     }
 
+    #[inline]
+    pub fn storage(&self) -> &[u8] {
+        &self.storage
+    }
+
     pub fn reset(&mut self, reserve_x: f64, reserve_y: f64) {
         self.reserve_x = reserve_x;
         self.reserve_y = reserve_y;

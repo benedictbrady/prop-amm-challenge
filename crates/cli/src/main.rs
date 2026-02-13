@@ -38,6 +38,10 @@ enum Commands {
         /// Use BPF runtime instead of native (slower, for validation)
         #[arg(long)]
         bpf: bool,
+        /// Path to a prebuilt BPF .so to use when running with --bpf (skips compilation).
+        /// Useful on machines without the Solana SBF toolchain installed.
+        #[arg(long)]
+        bpf_so: Option<String>,
     },
 }
 
@@ -53,6 +57,7 @@ fn main() -> anyhow::Result<()> {
             steps,
             workers,
             bpf,
-        } => commands::run::run(&file, simulations, steps, workers, bpf),
+            bpf_so,
+        } => commands::run::run(&file, simulations, steps, workers, bpf, bpf_so.as_deref()),
     }
 }

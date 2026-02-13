@@ -6,6 +6,12 @@ use solana_rbpf::{
 };
 
 use prop_amm_shared::instruction::STORAGE_SIZE;
+use std::sync::OnceLock;
+
+fn meter_disabled() -> bool {
+    static DISABLED: OnceLock<bool> = OnceLock::new();
+    *DISABLED.get_or_init(|| std::env::var_os("PROP_AMM_BPF_DISABLE_METER").is_some())
+}
 
 pub struct SyscallContext {
     pub return_data: [u8; 8],
@@ -22,7 +28,11 @@ impl SyscallContext {
             has_return_data: false,
             storage_data: vec![0u8; STORAGE_SIZE],
             has_storage_update: false,
-            remaining,
+            remaining: if meter_disabled() {
+                u64::MAX / 4
+            } else {
+                remaining
+            },
         }
     }
 
@@ -30,7 +40,11 @@ impl SyscallContext {
     pub fn reset(&mut self, remaining: u64) {
         self.has_return_data = false;
         self.has_storage_update = false;
-        self.remaining = remaining;
+        self.remaining = if meter_disabled() {
+            u64::MAX / 4
+        } else {
+            remaining
+        };
     }
 }
 
@@ -38,6 +52,9 @@ impl ContextObject for SyscallContext {
     fn trace(&mut self, _state: [u64; 12]) {}
 
     fn consume(&mut self, amount: u64) {
+        if meter_disabled() {
+            return;
+        }
         self.remaining = self.remaining.saturating_sub(amount);
     }
 
