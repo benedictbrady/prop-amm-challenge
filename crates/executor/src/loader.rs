@@ -8,7 +8,8 @@ use solana_rbpf::{
 };
 
 use crate::syscalls::{
-    SyscallAbort, SyscallContext, SyscallLog, SyscallSetReturnData, SyscallSetStorage,
+    SyscallAbort, SyscallContext, SyscallLog, SyscallMemcpy, SyscallMemset,
+    SyscallSetReturnData, SyscallSetStorage,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -49,6 +50,12 @@ impl BpfProgram {
             .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
         function_registry
             .register_function_hashed(*b"sol_set_storage", SyscallSetStorage::vm)
+            .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
+        function_registry
+            .register_function_hashed(*b"sol_memcpy_", SyscallMemcpy::vm)
+            .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
+        function_registry
+            .register_function_hashed(*b"sol_memset_", SyscallMemset::vm)
             .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
 
         let loader = Arc::new(BuiltinProgram::new_loader(
