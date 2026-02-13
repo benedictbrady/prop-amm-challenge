@@ -91,7 +91,7 @@ Your program receives instruction data with reserves and a 1024-byte read-only s
 | 17     | 8    | reserve_y    | u64    | Current Y reserve (1e9 scale)  |
 | 25     | 1024 | storage      | [u8]   | Read-only strategy storage     |
 
-Return 8 bytes via `sol_set_return_data` — the `output_amount: u64` (1e9 scale).
+Return the `output_amount: u64` (1e9 scale) with `prop_amm_submission_sdk::set_return_data_u64`.
 
 Guideline: decode instruction payloads with `wincode` rather than manual byte offsets. See [wincode docs](https://docs.rs/wincode/latest/wincode/).
 
@@ -110,7 +110,7 @@ After each **real trade** (not during quoting), the engine calls your program wi
 | 34     | 8    | step          | u64    | Current simulation step        |
 | 42     | 1024 | storage       | [u8]   | Current storage (read/write)   |
 
-To persist updated storage, call the `sol_set_storage` syscall with your modified buffer. If you don't call it, storage remains unchanged. The starter program's afterSwap is a no-op — storage is entirely optional.
+To persist updated storage, call `prop_amm_submission_sdk::set_storage` with your modified buffer. If you don't call it, storage remains unchanged. The starter program's afterSwap is a no-op, so storage is entirely optional.
 
 **When afterSwap is called:**
 - After arbitrageur executes a trade
@@ -125,6 +125,7 @@ To persist updated storage, call the `sol_set_storage` syscall with your modifie
 | Requirement   | Description                                                        |
 |---------------|--------------------------------------------------------------------|
 | **NAME**      | Must define `const NAME: &str = "...";` — shown on the leaderboard. |
+| **Safe Rust** | `unsafe` code is rejected. Keep your submission fully safe Rust.   |
 | **Monotonic** | Larger input must produce larger output.                           |
 | **Concave**   | Output must be concave in input (diminishing returns per unit).    |
 | **< 100k CU** | Must execute within the compute unit limit.                       |
@@ -135,6 +136,9 @@ Start with `programs/starter/` — a constant-product AMM with 500 bps fees. The
 
 ```rust
 use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
+use prop_amm_submission_sdk::{
+    ffi_after_swap, ffi_compute_swap, set_return_data_bytes, set_return_data_u64,
+};
 
 /// Required: displayed on the leaderboard.
 const NAME: &str = "My Strategy";
@@ -156,16 +160,18 @@ entrypoint!(process_instruction);
 pub fn process_instruction(
     _program_id: &Pubkey, _accounts: &[AccountInfo], instruction_data: &[u8],
 ) -> ProgramResult {
+    if instruction_data.is_empty() {
+        return Ok(());
+    }
+
     match instruction_data[0] {
         0 | 1 => {  // compute_swap
             let output = compute_swap(instruction_data);
-            unsafe { pinocchio::syscalls::sol_set_return_data(output.to_le_bytes().as_ptr(), 8); }
+            set_return_data_u64(output);
         }
         2 => {      // afterSwap — update storage here if needed
         }
-        3 => unsafe {  // Return strategy name for leaderboard
-            pinocchio::syscalls::sol_set_return_data(NAME.as_ptr(), NAME.len() as u64);
-        }
+        3 => set_return_data_bytes(NAME.as_bytes()),
         _ => {}
     }
     Ok(())
@@ -189,17 +195,21 @@ pub fn compute_swap(data: &[u8]) -> u64 {
 /// Required for native execution (local testing).
 #[cfg(not(target_os = "solana"))]
 #[no_mangle]
-pub unsafe extern "C" fn compute_swap_ffi(data: *const u8, len: usize) -> u64 {
-    compute_swap(core::slice::from_raw_parts(data, len))
+pub extern "C" fn compute_swap_ffi(data: *const u8, len: usize) -> u64 {
+    ffi_compute_swap(data, len, compute_swap)
+}
+
+pub fn after_swap(_data: &[u8], _storage: &mut [u8]) {
+    // Update storage here if needed
 }
 
 /// Optional: afterSwap hook for native mode.
 #[cfg(not(target_os = "solana"))]
 #[no_mangle]
-pub unsafe extern "C" fn after_swap_ffi(
-    _data: *const u8, _data_len: usize, _storage: *mut u8, _storage_len: usize,
+pub extern "C" fn after_swap_ffi(
+    data: *const u8, data_len: usize, storage: *mut u8, storage_len: usize,
 ) {
-    // Update storage here if needed
+    ffi_after_swap(data, data_len, storage, storage_len, after_swap);
 }
 ```
 

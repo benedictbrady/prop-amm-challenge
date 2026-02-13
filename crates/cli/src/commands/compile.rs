@@ -6,7 +6,6 @@ use std::{
 };
 
 const BUILD_RUNS_DIR: &str = ".build/runs";
-const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]\n";
 
 const CARGO_TOML: &str = r#"[package]
 name = "user_program"
@@ -137,16 +136,34 @@ fn find_native_lib(build_dir: &Path) -> anyhow::Result<PathBuf> {
 
 fn make_safe_submission_source(rs_path: &Path) -> anyhow::Result<String> {
     let source = std::fs::read_to_string(rs_path)?;
-    let safe_source = if source.starts_with(FORBID_UNSAFE) {
-        source
-    } else {
-        let mut wrapped = String::with_capacity(FORBID_UNSAFE.len() + source.len());
-        wrapped.push_str(FORBID_UNSAFE);
-        wrapped.push_str(&source);
-        wrapped
-    };
+    if source_contains_unsafe_keyword(&source)? {
+        anyhow::bail!(
+            "Unsafe Rust is not allowed in submissions. Remove all `unsafe` blocks/functions/keywords from your source."
+        );
+    }
+
+    let safe_source = source;
 
     Ok(safe_source)
+}
+
+fn source_contains_unsafe_keyword(source: &str) -> anyhow::Result<bool> {
+    let stream: proc_macro2::TokenStream = source
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Failed to parse source for safety checks: {}", e))?;
+    Ok(token_stream_contains_unsafe(stream))
+}
+
+fn token_stream_contains_unsafe(stream: proc_macro2::TokenStream) -> bool {
+    stream.into_iter().any(token_tree_contains_unsafe)
+}
+
+fn token_tree_contains_unsafe(tree: proc_macro2::TokenTree) -> bool {
+    match tree {
+        proc_macro2::TokenTree::Ident(ident) => ident == "unsafe",
+        proc_macro2::TokenTree::Group(group) => token_stream_contains_unsafe(group.stream()),
+        _ => false,
+    }
 }
 
 fn find_bpf_so(build_dir: &Path) -> anyhow::Result<PathBuf> {
