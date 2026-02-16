@@ -1,11 +1,13 @@
-use std::cmp::Ordering;
+use prop_amm_shared::nano::{f64_to_nano, nano_to_f64};
 
-const X_REL_EPS: f64 = 1e-9;
-const X_ABS_EPS: f64 = 1e-12;
-const OUTPUT_REL_TOL: f64 = 1e-9;
-const OUTPUT_ABS_TOL: f64 = 1e-9;
-const SLOPE_REL_TOL: f64 = 1e-2;
-const SLOPE_ABS_TOL: f64 = 1e-8;
+// Finite differences involve two endpoints; allow a few nanos of ambiguity from endpoint
+// quantization and round-trip noise.
+const QUOTE_DELTA_UNCERTAINTY_NANO: u64 = 4;
+// Adjacent sample x-values that differ by <= 4 nanos are effectively the same grid point for
+// shape-check purposes.
+const INPUT_MERGE_EPS_NANO: u64 = 4;
+// Keep runtime shape checks aligned with validator granularity (`CONCAVITY_DELTA_NANO`).
+const MIN_CONCAVITY_DX_NANO: u64 = 1_000_000;
 
 pub(crate) fn enforce_submission_monotonic_concave(
     amm_name: &str,
@@ -23,20 +25,22 @@ pub(crate) fn enforce_submission_monotonic_concave(
 }
 
 fn submission_shape_violation(points: &[(f64, f64)], min_input: f64) -> Option<String> {
-    let mut sorted: Vec<(f64, f64)> = points
+    let min_input_nano = f64_to_nano(min_input);
+    let mut sorted: Vec<(u64, u64)> = points
         .iter()
         .copied()
         .filter(|(input, output)| {
             input.is_finite() && output.is_finite() && *input > min_input && *output >= 0.0
         })
+        .map(|(input, output)| (f64_to_nano(input), f64_to_nano(output)))
+        .filter(|(input, _)| *input > min_input_nano)
         .collect();
-    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    sorted.sort_by_key(|(input, _)| *input);
 
-    let mut cleaned: Vec<(f64, f64)> = Vec::with_capacity(sorted.len());
+    let mut cleaned: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
     for (input, output) in sorted {
         if let Some((prev_input, prev_output)) = cleaned.last_mut() {
-            let eps = X_ABS_EPS.max(X_REL_EPS * prev_input.abs().max(input.abs()).max(1.0));
-            if (input - *prev_input).abs() <= eps {
+            if input.saturating_sub(*prev_input) <= INPUT_MERGE_EPS_NANO {
                 if output > *prev_output {
                     *prev_output = output;
                 }
@@ -49,35 +53,49 @@ fn submission_shape_violation(points: &[(f64, f64)], min_input: f64) -> Option<S
     for window in cleaned.windows(2) {
         let (in_a, out_a) = window[0];
         let (in_b, out_b) = window[1];
-        let allowed_drop = OUTPUT_ABS_TOL + OUTPUT_REL_TOL * out_a.abs().max(out_b.abs()).max(1.0);
-        if in_b > in_a && out_b + allowed_drop < out_a {
+        if in_b > in_a && out_b.saturating_add(QUOTE_DELTA_UNCERTAINTY_NANO) < out_a {
             return Some(format!(
                 "monotonicity violated: input {in_a:.6} -> output {out_a:.6}, \
-                 input {in_b:.6} -> output {out_b:.6}"
+                 input {in_b:.6} -> output {out_b:.6}",
+                in_a = nano_to_f64(in_a),
+                out_a = nano_to_f64(out_a),
+                in_b = nano_to_f64(in_b),
+                out_b = nano_to_f64(out_b),
             ));
         }
     }
 
-    let mut prev_slope: Option<f64> = None;
+    let mut prev_segment: Option<(u64, u64)> = None; // (dy, dx)
     for window in cleaned.windows(2) {
         let (in_a, out_a) = window[0];
         let (in_b, out_b) = window[1];
         let dx = in_b - in_a;
-        if dx <= X_ABS_EPS {
+        if dx == 0 {
             continue;
         }
-        let slope = (out_b - out_a) / dx;
-        if let Some(prev) = prev_slope {
-            let scale = prev.abs().max(slope.abs()).max(1e-6);
-            let allowed_rise = SLOPE_ABS_TOL + SLOPE_REL_TOL * scale;
-            if slope > prev + allowed_rise {
+        if dx < MIN_CONCAVITY_DX_NANO {
+            continue;
+        }
+        let dy = out_b.saturating_sub(out_a);
+        if let Some((prev_dy, prev_dx)) = prev_segment {
+            let prev_upper = prev_dy.saturating_add(QUOTE_DELTA_UNCERTAINTY_NANO);
+            let curr_lower = dy.saturating_sub(QUOTE_DELTA_UNCERTAINTY_NANO);
+            let lhs = (prev_upper as u128) * (dx as u128);
+            let rhs = (curr_lower as u128) * (prev_dx as u128);
+            if rhs > lhs {
+                let prev_slope = prev_dy as f64 / prev_dx as f64;
+                let slope = dy as f64 / dx as f64;
                 return Some(format!(
                     "concavity violated: slope rose from {prev:.9} to {slope:.9} \
-                     between inputs {in_a:.6} and {in_b:.6}"
+                     between inputs {in_a:.6} and {in_b:.6}",
+                    prev = prev_slope,
+                    slope = slope,
+                    in_a = nano_to_f64(in_a),
+                    in_b = nano_to_f64(in_b),
                 ));
             }
         }
-        prev_slope = Some(slope);
+        prev_segment = Some((dy, dx));
     }
 
     None
