@@ -105,11 +105,15 @@ fn submission_shape_violation(points: &[(f64, f64)], min_input: f64) -> Option<S
 mod tests {
     use super::submission_shape_violation;
     use crate::amm::BpfAmm;
+    use crate::engine;
+    use prop_amm_shared::instruction::decode_instruction;
+    use prop_amm_shared::config::{HyperparameterVariance, SimulationConfig};
     use prop_amm_shared::normalizer::compute_swap as normalizer_swap;
     use rand::seq::SliceRandom;
     use rand::Rng;
     use rand::SeedableRng;
     use rand_pcg::Pcg64;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     const MIN_INPUT: f64 = 1e-3;
 
@@ -448,5 +452,130 @@ mod tests {
             }
             assert_valid(&points, &format!("normalizer sell case {case_idx}"));
         }
+    }
+
+    #[test]
+    fn avoids_false_positive_on_cp30_seed12_runtime_path() {
+        let mut base = SimulationConfig::default();
+        base.n_steps = 10_000;
+        let config = HyperparameterVariance::default().apply(&base, 12);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            engine::run_simulation_native(normalizer_swap, None, normalizer_swap, None, &config)
+                .expect("simulation should complete");
+        }));
+
+        assert!(
+            result.is_ok(),
+            "normalizer-like CP30 submission should not trip runtime shape checks"
+        );
+    }
+
+    fn cp_out(side: u8, input: u128, rx: u128, ry: u128, gamma_num: u128) -> u128 {
+        if input == 0 || rx == 0 || ry == 0 {
+            return 0;
+        }
+        let net = input.saturating_mul(gamma_num) / 10_000;
+        let k = rx.saturating_mul(ry);
+        match side {
+            0 => {
+                let new_ry = ry.saturating_add(net);
+                rx.saturating_sub((k + new_ry - 1) / new_ry)
+            }
+            1 => {
+                let new_rx = rx.saturating_add(net);
+                ry.saturating_sub((k + new_rx - 1) / new_rx)
+            }
+            _ => 0,
+        }
+    }
+
+    fn one_div_swap(data: &[u8], base_fee_bps: u128, subsidy_bps: u128, subsidy_cap_y: u128) -> u64 {
+        if data.len() < 25 {
+            return 0;
+        }
+        let (side, input_u64, rx_u64, ry_u64) = decode_instruction(data);
+        let input = input_u64 as u128;
+        let rx = rx_u64 as u128;
+        let ry = ry_u64 as u128;
+        if input == 0 || rx == 0 || ry == 0 {
+            return 0;
+        }
+
+        let base = cp_out(side, input, rx, ry, 10_000u128.saturating_sub(base_fee_bps));
+        let bonus = match side {
+            0 => {
+                let cap_x = subsidy_cap_y.saturating_mul(rx) / ry.max(1);
+                let num = input.saturating_mul(rx).saturating_mul(subsidy_bps);
+                let den = ry.saturating_mul(10_000).max(1);
+                (num / den).min(cap_x)
+            }
+            1 => {
+                let num = input.saturating_mul(ry).saturating_mul(subsidy_bps);
+                let den = rx.saturating_mul(10_000).max(1);
+                (num / den).min(subsidy_cap_y)
+            }
+            _ => 0,
+        };
+        let out = base.saturating_add(bonus);
+        match side {
+            0 => out.min(rx) as u64,
+            1 => out.min(ry) as u64,
+            _ => 0,
+        }
+    }
+
+    fn one_div_40_100_020_swap(data: &[u8]) -> u64 {
+        one_div_swap(data, 40, 100, 20_000_000)
+    }
+
+    fn one_div_30_80_019_swap(data: &[u8]) -> u64 {
+        one_div_swap(data, 30, 80, 19_000_000)
+    }
+
+    #[test]
+    fn avoids_false_positive_on_one_div_40_100_020_seed30_runtime_path() {
+        let mut base = SimulationConfig::default();
+        base.n_steps = 10_000;
+        let config = HyperparameterVariance::default().apply(&base, 30);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            engine::run_simulation_native(
+                one_div_40_100_020_swap,
+                None,
+                normalizer_swap,
+                None,
+                &config,
+            )
+            .expect("simulation should complete");
+        }));
+
+        assert!(
+            result.is_ok(),
+            "one-div 40/100/0.020 strategy should not trip runtime shape checks"
+        );
+    }
+
+    #[test]
+    fn avoids_false_positive_on_one_div_30_80_019_seed72_runtime_path() {
+        let mut base = SimulationConfig::default();
+        base.n_steps = 10_000;
+        let config = HyperparameterVariance::default().apply(&base, 72);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            engine::run_simulation_native(
+                one_div_30_80_019_swap,
+                None,
+                normalizer_swap,
+                None,
+                &config,
+            )
+            .expect("simulation should complete");
+        }));
+
+        assert!(
+            result.is_ok(),
+            "one-div 30/80/0.019 strategy should not trip runtime shape checks"
+        );
     }
 }
