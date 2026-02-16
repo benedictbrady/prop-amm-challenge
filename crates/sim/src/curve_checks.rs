@@ -1,21 +1,13 @@
-use prop_amm_shared::nano::{f64_to_nano, NANO_SCALE_F64};
+use prop_amm_shared::nano::{f64_to_nano, nano_to_f64};
 
-const X_REL_EPS: f64 = 1e-9;
-const X_ABS_EPS: f64 = 1e-12;
-const OUTPUT_DROP_TOL_NANOS: u64 = 1;
-// Ignore sub-microtoken x-intervals when comparing adjacent secant slopes: these intervals
-// are dominated by integer quantization noise from input/output nanos.
-const SLOPE_MIN_DX_NANOS: u64 = 1_000;
-const SLOPE_REL_TOL: f64 = 1.5e-2;
-const SLOPE_ABS_TOL: f64 = 1e-8;
-// Additional slope rise allowance for integer-quantized quotes.
-const SLOPE_QUANTIZATION_TOL: f64 = 2.0;
-
-#[derive(Clone, Copy, Debug)]
-struct QuantizedPoint {
-    input_nanos: u64,
-    output_nanos: u64,
-}
+// Finite differences involve two endpoints; allow a few nanos of ambiguity from endpoint
+// quantization and round-trip noise.
+const QUOTE_DELTA_UNCERTAINTY_NANO: u64 = 4;
+// Adjacent sample x-values that differ by <= 4 nanos are effectively the same grid point for
+// shape-check purposes.
+const INPUT_MERGE_EPS_NANO: u64 = 4;
+// Keep runtime shape checks aligned with validator granularity (`CONCAVITY_DELTA_NANO`).
+const MIN_CONCAVITY_DX_NANO: u64 = 1_000_000;
 
 pub(crate) fn enforce_submission_monotonic_concave(
     amm_name: &str,
@@ -33,108 +25,80 @@ pub(crate) fn enforce_submission_monotonic_concave(
 }
 
 fn submission_shape_violation(points: &[(f64, f64)], min_input: f64) -> Option<String> {
-    let min_input_nanos = f64_to_nano(min_input);
-
-    let mut sorted: Vec<QuantizedPoint> = points
+    let min_input_nano = f64_to_nano(min_input);
+    let mut sorted: Vec<(u64, u64)> = points
         .iter()
         .copied()
         .filter(|(input, output)| {
             input.is_finite() && output.is_finite() && *input > min_input && *output >= 0.0
         })
-        .map(|(input, output)| QuantizedPoint {
-            input_nanos: f64_to_nano(input),
-            output_nanos: f64_to_nano(output),
-        })
-        .filter(|p| p.input_nanos > min_input_nanos)
+        .map(|(input, output)| (f64_to_nano(input), f64_to_nano(output)))
+        .filter(|(input, _)| *input > min_input_nano)
         .collect();
-    sorted.sort_by_key(|p| p.input_nanos);
+    sorted.sort_by_key(|(input, _)| *input);
 
-    let mut cleaned: Vec<QuantizedPoint> = Vec::with_capacity(sorted.len());
-    for point in sorted {
-        if let Some(prev) = cleaned.last_mut() {
-            let ref_input = (prev.input_nanos.max(point.input_nanos) as f64) / NANO_SCALE_F64;
-            let merge_eps_tokens = X_ABS_EPS.max(X_REL_EPS * ref_input.abs().max(1.0));
-            let merge_eps_nanos = f64_to_nano(merge_eps_tokens).max(1);
-            if point.input_nanos.saturating_sub(prev.input_nanos) <= merge_eps_nanos {
-                if point.output_nanos > prev.output_nanos {
-                    prev.output_nanos = point.output_nanos;
+    let mut cleaned: Vec<(u64, u64)> = Vec::with_capacity(sorted.len());
+    for (input, output) in sorted {
+        if let Some((prev_input, prev_output)) = cleaned.last_mut() {
+            if input.saturating_sub(*prev_input) <= INPUT_MERGE_EPS_NANO {
+                if output > *prev_output {
+                    *prev_output = output;
                 }
                 continue;
             }
         }
-        cleaned.push(point);
+        cleaned.push((input, output));
     }
 
     for window in cleaned.windows(2) {
-        let a = window[0];
-        let b = window[1];
-        if b.input_nanos > a.input_nanos
-            && b.output_nanos.saturating_add(OUTPUT_DROP_TOL_NANOS) < a.output_nanos
-        {
-            let in_a = a.input_nanos as f64 / NANO_SCALE_F64;
-            let out_a = a.output_nanos as f64 / NANO_SCALE_F64;
-            let in_b = b.input_nanos as f64 / NANO_SCALE_F64;
-            let out_b = b.output_nanos as f64 / NANO_SCALE_F64;
+        let (in_a, out_a) = window[0];
+        let (in_b, out_b) = window[1];
+        if in_b > in_a && out_b.saturating_add(QUOTE_DELTA_UNCERTAINTY_NANO) < out_a {
             return Some(format!(
                 "monotonicity violated: input {in_a:.6} -> output {out_a:.6}, \
-                 input {in_b:.6} -> output {out_b:.6}"
+                 input {in_b:.6} -> output {out_b:.6}",
+                in_a = nano_to_f64(in_a),
+                out_a = nano_to_f64(out_a),
+                in_b = nano_to_f64(in_b),
+                out_b = nano_to_f64(out_b),
             ));
         }
     }
 
-    let slope_points = coarsen_for_slope_checks(&cleaned);
-    let mut prev_slope: Option<(f64, f64)> = None;
-    for window in slope_points.windows(2) {
-        let a = window[0];
-        let b = window[1];
-        let dx_nanos = b.input_nanos.saturating_sub(a.input_nanos);
-        if dx_nanos < SLOPE_MIN_DX_NANOS {
+    let mut prev_segment: Option<(u64, u64)> = None; // (dy, dx)
+    for window in cleaned.windows(2) {
+        let (in_a, out_a) = window[0];
+        let (in_b, out_b) = window[1];
+        let dx = in_b - in_a;
+        if dx == 0 {
             continue;
         }
-        let dy_nanos = b.output_nanos.saturating_sub(a.output_nanos);
-        let dx = dx_nanos as f64;
-        let slope = dy_nanos as f64 / dx;
-        if let Some((prev, prev_dx)) = prev_slope {
-            let scale = prev.abs().max(slope.abs()).max(1e-9);
-            let quantization_allowance = SLOPE_QUANTIZATION_TOL * (1.0 / prev_dx + 1.0 / dx);
-            let allowed_rise = SLOPE_ABS_TOL + SLOPE_REL_TOL * scale + quantization_allowance;
-            if slope > prev + allowed_rise {
-                let in_a = a.input_nanos as f64 / NANO_SCALE_F64;
-                let in_b = b.input_nanos as f64 / NANO_SCALE_F64;
+        if dx < MIN_CONCAVITY_DX_NANO {
+            continue;
+        }
+        let dy = out_b.saturating_sub(out_a);
+        if let Some((prev_dy, prev_dx)) = prev_segment {
+            let prev_upper = prev_dy.saturating_add(QUOTE_DELTA_UNCERTAINTY_NANO);
+            let curr_lower = dy.saturating_sub(QUOTE_DELTA_UNCERTAINTY_NANO);
+            let lhs = (prev_upper as u128) * (dx as u128);
+            let rhs = (curr_lower as u128) * (prev_dx as u128);
+            if rhs > lhs {
+                let prev_slope = prev_dy as f64 / prev_dx as f64;
+                let slope = dy as f64 / dx as f64;
                 return Some(format!(
                     "concavity violated: slope rose from {prev:.9} to {slope:.9} \
-                     between inputs {in_a:.6} and {in_b:.6}"
+                     between inputs {in_a:.6} and {in_b:.6}",
+                    prev = prev_slope,
+                    slope = slope,
+                    in_a = nano_to_f64(in_a),
+                    in_b = nano_to_f64(in_b),
                 ));
             }
         }
-        prev_slope = Some((slope, dx));
+        prev_segment = Some((dy, dx));
     }
 
     None
-}
-
-fn coarsen_for_slope_checks(points: &[QuantizedPoint]) -> Vec<QuantizedPoint> {
-    if points.len() <= 2 {
-        return points.to_vec();
-    }
-
-    let mut out = Vec::with_capacity(points.len());
-    out.push(points[0]);
-    let mut last_kept_input = points[0].input_nanos;
-
-    for point in &points[1..points.len() - 1] {
-        if point.input_nanos.saturating_sub(last_kept_input) >= SLOPE_MIN_DX_NANOS {
-            out.push(*point);
-            last_kept_input = point.input_nanos;
-        }
-    }
-
-    let last = points[points.len() - 1];
-    if out.last().map(|p| p.input_nanos) != Some(last.input_nanos) {
-        out.push(last);
-    }
-
-    out
 }
 
 #[cfg(test)]
