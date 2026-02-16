@@ -1,11 +1,21 @@
-use std::cmp::Ordering;
+use prop_amm_shared::nano::{f64_to_nano, NANO_SCALE_F64};
 
 const X_REL_EPS: f64 = 1e-9;
 const X_ABS_EPS: f64 = 1e-12;
-const OUTPUT_REL_TOL: f64 = 1e-9;
-const OUTPUT_ABS_TOL: f64 = 1e-9;
-const SLOPE_REL_TOL: f64 = 1e-2;
+const OUTPUT_DROP_TOL_NANOS: u64 = 1;
+// Ignore sub-microtoken x-intervals when comparing adjacent secant slopes: these intervals
+// are dominated by integer quantization noise from input/output nanos.
+const SLOPE_MIN_DX_NANOS: u64 = 1_000;
+const SLOPE_REL_TOL: f64 = 1.5e-2;
 const SLOPE_ABS_TOL: f64 = 1e-8;
+// Additional slope rise allowance for integer-quantized quotes.
+const SLOPE_QUANTIZATION_TOL: f64 = 2.0;
+
+#[derive(Clone, Copy, Debug)]
+struct QuantizedPoint {
+    input_nanos: u64,
+    output_nanos: u64,
+}
 
 pub(crate) fn enforce_submission_monotonic_concave(
     amm_name: &str,
@@ -23,34 +33,48 @@ pub(crate) fn enforce_submission_monotonic_concave(
 }
 
 fn submission_shape_violation(points: &[(f64, f64)], min_input: f64) -> Option<String> {
-    let mut sorted: Vec<(f64, f64)> = points
+    let min_input_nanos = f64_to_nano(min_input);
+
+    let mut sorted: Vec<QuantizedPoint> = points
         .iter()
         .copied()
         .filter(|(input, output)| {
             input.is_finite() && output.is_finite() && *input > min_input && *output >= 0.0
         })
+        .map(|(input, output)| QuantizedPoint {
+            input_nanos: f64_to_nano(input),
+            output_nanos: f64_to_nano(output),
+        })
+        .filter(|p| p.input_nanos > min_input_nanos)
         .collect();
-    sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    sorted.sort_by_key(|p| p.input_nanos);
 
-    let mut cleaned: Vec<(f64, f64)> = Vec::with_capacity(sorted.len());
-    for (input, output) in sorted {
-        if let Some((prev_input, prev_output)) = cleaned.last_mut() {
-            let eps = X_ABS_EPS.max(X_REL_EPS * prev_input.abs().max(input.abs()).max(1.0));
-            if (input - *prev_input).abs() <= eps {
-                if output > *prev_output {
-                    *prev_output = output;
+    let mut cleaned: Vec<QuantizedPoint> = Vec::with_capacity(sorted.len());
+    for point in sorted {
+        if let Some(prev) = cleaned.last_mut() {
+            let ref_input = (prev.input_nanos.max(point.input_nanos) as f64) / NANO_SCALE_F64;
+            let merge_eps_tokens = X_ABS_EPS.max(X_REL_EPS * ref_input.abs().max(1.0));
+            let merge_eps_nanos = f64_to_nano(merge_eps_tokens).max(1);
+            if point.input_nanos.saturating_sub(prev.input_nanos) <= merge_eps_nanos {
+                if point.output_nanos > prev.output_nanos {
+                    prev.output_nanos = point.output_nanos;
                 }
                 continue;
             }
         }
-        cleaned.push((input, output));
+        cleaned.push(point);
     }
 
     for window in cleaned.windows(2) {
-        let (in_a, out_a) = window[0];
-        let (in_b, out_b) = window[1];
-        let allowed_drop = OUTPUT_ABS_TOL + OUTPUT_REL_TOL * out_a.abs().max(out_b.abs()).max(1.0);
-        if in_b > in_a && out_b + allowed_drop < out_a {
+        let a = window[0];
+        let b = window[1];
+        if b.input_nanos > a.input_nanos
+            && b.output_nanos.saturating_add(OUTPUT_DROP_TOL_NANOS) < a.output_nanos
+        {
+            let in_a = a.input_nanos as f64 / NANO_SCALE_F64;
+            let out_a = a.output_nanos as f64 / NANO_SCALE_F64;
+            let in_b = b.input_nanos as f64 / NANO_SCALE_F64;
+            let out_b = b.output_nanos as f64 / NANO_SCALE_F64;
             return Some(format!(
                 "monotonicity violated: input {in_a:.6} -> output {out_a:.6}, \
                  input {in_b:.6} -> output {out_b:.6}"
@@ -58,40 +82,74 @@ fn submission_shape_violation(points: &[(f64, f64)], min_input: f64) -> Option<S
         }
     }
 
-    let mut prev_slope: Option<f64> = None;
-    for window in cleaned.windows(2) {
-        let (in_a, out_a) = window[0];
-        let (in_b, out_b) = window[1];
-        let dx = in_b - in_a;
-        if dx <= X_ABS_EPS {
+    let slope_points = coarsen_for_slope_checks(&cleaned);
+    let mut prev_slope: Option<(f64, f64)> = None;
+    for window in slope_points.windows(2) {
+        let a = window[0];
+        let b = window[1];
+        let dx_nanos = b.input_nanos.saturating_sub(a.input_nanos);
+        if dx_nanos < SLOPE_MIN_DX_NANOS {
             continue;
         }
-        let slope = (out_b - out_a) / dx;
-        if let Some(prev) = prev_slope {
-            let scale = prev.abs().max(slope.abs()).max(1e-6);
-            let allowed_rise = SLOPE_ABS_TOL + SLOPE_REL_TOL * scale;
+        let dy_nanos = b.output_nanos.saturating_sub(a.output_nanos);
+        let dx = dx_nanos as f64;
+        let slope = dy_nanos as f64 / dx;
+        if let Some((prev, prev_dx)) = prev_slope {
+            let scale = prev.abs().max(slope.abs()).max(1e-9);
+            let quantization_allowance = SLOPE_QUANTIZATION_TOL * (1.0 / prev_dx + 1.0 / dx);
+            let allowed_rise = SLOPE_ABS_TOL + SLOPE_REL_TOL * scale + quantization_allowance;
             if slope > prev + allowed_rise {
+                let in_a = a.input_nanos as f64 / NANO_SCALE_F64;
+                let in_b = b.input_nanos as f64 / NANO_SCALE_F64;
                 return Some(format!(
                     "concavity violated: slope rose from {prev:.9} to {slope:.9} \
                      between inputs {in_a:.6} and {in_b:.6}"
                 ));
             }
         }
-        prev_slope = Some(slope);
+        prev_slope = Some((slope, dx));
     }
 
     None
+}
+
+fn coarsen_for_slope_checks(points: &[QuantizedPoint]) -> Vec<QuantizedPoint> {
+    if points.len() <= 2 {
+        return points.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(points.len());
+    out.push(points[0]);
+    let mut last_kept_input = points[0].input_nanos;
+
+    for point in &points[1..points.len() - 1] {
+        if point.input_nanos.saturating_sub(last_kept_input) >= SLOPE_MIN_DX_NANOS {
+            out.push(*point);
+            last_kept_input = point.input_nanos;
+        }
+    }
+
+    let last = points[points.len() - 1];
+    if out.last().map(|p| p.input_nanos) != Some(last.input_nanos) {
+        out.push(last);
+    }
+
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::submission_shape_violation;
     use crate::amm::BpfAmm;
+    use crate::engine;
+    use prop_amm_shared::instruction::decode_instruction;
+    use prop_amm_shared::config::{HyperparameterVariance, SimulationConfig};
     use prop_amm_shared::normalizer::compute_swap as normalizer_swap;
     use rand::seq::SliceRandom;
     use rand::Rng;
     use rand::SeedableRng;
     use rand_pcg::Pcg64;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     const MIN_INPUT: f64 = 1e-3;
 
@@ -430,5 +488,130 @@ mod tests {
             }
             assert_valid(&points, &format!("normalizer sell case {case_idx}"));
         }
+    }
+
+    #[test]
+    fn avoids_false_positive_on_cp30_seed12_runtime_path() {
+        let mut base = SimulationConfig::default();
+        base.n_steps = 10_000;
+        let config = HyperparameterVariance::default().apply(&base, 12);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            engine::run_simulation_native(normalizer_swap, None, normalizer_swap, None, &config)
+                .expect("simulation should complete");
+        }));
+
+        assert!(
+            result.is_ok(),
+            "normalizer-like CP30 submission should not trip runtime shape checks"
+        );
+    }
+
+    fn cp_out(side: u8, input: u128, rx: u128, ry: u128, gamma_num: u128) -> u128 {
+        if input == 0 || rx == 0 || ry == 0 {
+            return 0;
+        }
+        let net = input.saturating_mul(gamma_num) / 10_000;
+        let k = rx.saturating_mul(ry);
+        match side {
+            0 => {
+                let new_ry = ry.saturating_add(net);
+                rx.saturating_sub((k + new_ry - 1) / new_ry)
+            }
+            1 => {
+                let new_rx = rx.saturating_add(net);
+                ry.saturating_sub((k + new_rx - 1) / new_rx)
+            }
+            _ => 0,
+        }
+    }
+
+    fn one_div_swap(data: &[u8], base_fee_bps: u128, subsidy_bps: u128, subsidy_cap_y: u128) -> u64 {
+        if data.len() < 25 {
+            return 0;
+        }
+        let (side, input_u64, rx_u64, ry_u64) = decode_instruction(data);
+        let input = input_u64 as u128;
+        let rx = rx_u64 as u128;
+        let ry = ry_u64 as u128;
+        if input == 0 || rx == 0 || ry == 0 {
+            return 0;
+        }
+
+        let base = cp_out(side, input, rx, ry, 10_000u128.saturating_sub(base_fee_bps));
+        let bonus = match side {
+            0 => {
+                let cap_x = subsidy_cap_y.saturating_mul(rx) / ry.max(1);
+                let num = input.saturating_mul(rx).saturating_mul(subsidy_bps);
+                let den = ry.saturating_mul(10_000).max(1);
+                (num / den).min(cap_x)
+            }
+            1 => {
+                let num = input.saturating_mul(ry).saturating_mul(subsidy_bps);
+                let den = rx.saturating_mul(10_000).max(1);
+                (num / den).min(subsidy_cap_y)
+            }
+            _ => 0,
+        };
+        let out = base.saturating_add(bonus);
+        match side {
+            0 => out.min(rx) as u64,
+            1 => out.min(ry) as u64,
+            _ => 0,
+        }
+    }
+
+    fn one_div_40_100_020_swap(data: &[u8]) -> u64 {
+        one_div_swap(data, 40, 100, 20_000_000)
+    }
+
+    fn one_div_30_80_019_swap(data: &[u8]) -> u64 {
+        one_div_swap(data, 30, 80, 19_000_000)
+    }
+
+    #[test]
+    fn avoids_false_positive_on_one_div_40_100_020_seed30_runtime_path() {
+        let mut base = SimulationConfig::default();
+        base.n_steps = 10_000;
+        let config = HyperparameterVariance::default().apply(&base, 30);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            engine::run_simulation_native(
+                one_div_40_100_020_swap,
+                None,
+                normalizer_swap,
+                None,
+                &config,
+            )
+            .expect("simulation should complete");
+        }));
+
+        assert!(
+            result.is_ok(),
+            "one-div 40/100/0.020 strategy should not trip runtime shape checks"
+        );
+    }
+
+    #[test]
+    fn avoids_false_positive_on_one_div_30_80_019_seed72_runtime_path() {
+        let mut base = SimulationConfig::default();
+        base.n_steps = 10_000;
+        let config = HyperparameterVariance::default().apply(&base, 72);
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            engine::run_simulation_native(
+                one_div_30_80_019_swap,
+                None,
+                normalizer_swap,
+                None,
+                &config,
+            )
+            .expect("simulation should complete");
+        }));
+
+        assert!(
+            result.is_ok(),
+            "one-div 30/80/0.019 strategy should not trip runtime shape checks"
+        );
     }
 }
