@@ -262,6 +262,7 @@ else
 fi
 
 su - ec2-user -c "if ! command -v cargo >/dev/null 2>&1; then curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal; fi"
+su - ec2-user -c "if [[ -f \$HOME/.cargo/env ]]; then source \$HOME/.cargo/env; fi; if ! command -v cargo-build-sbf >/dev/null 2>&1; then cargo install cargo-build-sbf --locked; fi; cargo build-sbf --install-only --force-tools-install"
 su - ec2-user -c "cd /opt/prop-amm/repo && python3 -m venv .venv"
 su - ec2-user -c "cd /opt/prop-amm/repo && source .venv/bin/activate && pip install --upgrade pip"
 su - ec2-user -c "cd /opt/prop-amm/repo && source .venv/bin/activate && pip install -r harness/requirements.txt"

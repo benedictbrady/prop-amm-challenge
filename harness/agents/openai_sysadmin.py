@@ -94,6 +94,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def unique_items(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
@@ -107,28 +118,35 @@ def main(argv: list[str]) -> int:
     models = [args.model]
     if args.fallback_model and args.fallback_model not in models:
         models.append(args.fallback_model)
+    efforts = unique_items([args.reasoning_effort, "medium", "low"])
 
     data: dict[str, Any] | None = None
     last_error = ""
     for model in models:
-        try:
-            resp = client.responses.create(
-                model=model,
-                reasoning={"effort": args.reasoning_effort},
-                max_output_tokens=args.max_output_tokens,
-                input=[
-                    {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-                    {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
-                ],
-            )
-            text = extract_output_text(resp)
-            data = parse_json_obj(text)
-            if data is not None:
-                break
-            last_error = f"model {model} returned non-JSON output"
-        except Exception as exc:  # pragma: no cover - network/runtime errors
-            last_error = f"{type(exc).__name__}: {exc}"
-            continue
+        for effort in efforts:
+            try:
+                resp = client.responses.create(
+                    model=model,
+                    reasoning={"effort": effort},
+                    max_output_tokens=max(args.max_output_tokens, 2000),
+                    input=[
+                        {
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
+                        },
+                        {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+                    ],
+                )
+                text = extract_output_text(resp)
+                data = parse_json_obj(text)
+                if data is not None:
+                    break
+                last_error = f"model {model} effort={effort} returned non-JSON output"
+            except Exception as exc:  # pragma: no cover - network/runtime errors
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
+        if data is not None:
+            break
 
     if data is None:
         print(

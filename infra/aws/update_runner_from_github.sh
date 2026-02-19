@@ -93,6 +93,10 @@ sudo -u ec2-user bash -lc '
   if [[ -f "$HOME/.cargo/env" ]]; then
     source "$HOME/.cargo/env"
   fi
+  if ! command -v cargo-build-sbf >/dev/null 2>&1; then
+    cargo install cargo-build-sbf --locked
+  fi
+  cargo build-sbf --install-only || true
 
   cd ${REPO_DIR}
 

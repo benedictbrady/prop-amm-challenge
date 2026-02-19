@@ -597,11 +597,20 @@ def recent_agent_failure_streak(state: dict[str, Any]) -> int:
     streak = 0
     for item in reversed(state.get("iterations", [])):
         agent = item.get("agent", {})
+        task = item.get("task", {})
+        eval_result = task.get("result", {}) if isinstance(task, dict) else {}
+        validation = eval_result.get("validation", {}) if isinstance(eval_result, dict) else {}
         if not isinstance(agent, dict):
             break
         exit_code = safe_int(agent.get("exit_code"))
         timed_out = bool(agent.get("timed_out", False))
-        if exit_code == 0 and not timed_out:
+        evaluate_exit = safe_int(task.get("evaluate_command_exit")) if isinstance(task, dict) else None
+        validation_exit = safe_int(validation.get("exit_code")) if isinstance(validation, dict) else None
+        eval_error = bool(eval_result.get("error")) if isinstance(eval_result, dict) else False
+
+        agent_failed = exit_code != 0 or timed_out
+        task_failed = evaluate_exit not in (None, 0) or validation_exit not in (None, 0) or eval_error
+        if not agent_failed and not task_failed:
             break
         streak += 1
     return streak

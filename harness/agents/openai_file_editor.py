@@ -148,6 +148,17 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def unique_items(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return ordered
+
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
 
@@ -174,65 +185,59 @@ def main(argv: list[str]) -> int:
     models = [args.model]
     if args.fallback_model and args.fallback_model not in models:
         models.append(args.fallback_model)
+    efforts = unique_items([args.reasoning_effort, "medium", "low"])
 
-    resp: Any | None = None
-    last_error = ""
+    last_error = "no response generated"
     for model in models:
-        try:
-            resp = client.responses.create(
-                model=model,
-                reasoning={"effort": args.reasoning_effort},
-                max_output_tokens=args.max_output_tokens,
-                input=[
-                    {
-                        "role": "system",
-                        "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
-                    },
-                    {
-                        "role": "user",
-                        "content": [{"type": "input_text", "text": user_prompt}],
-                    },
-                ],
-            )
-            break
-        except Exception as exc:  # pragma: no cover - network/runtime errors
-            last_error = f"{type(exc).__name__}: {exc}"
-            continue
+        for effort in efforts:
+            try:
+                resp = client.responses.create(
+                    model=model,
+                    reasoning={"effort": effort},
+                    max_output_tokens=max(args.max_output_tokens, 8000),
+                    input=[
+                        {
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
+                        },
+                        {
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": user_prompt}],
+                        },
+                    ],
+                )
+            except Exception as exc:  # pragma: no cover - network/runtime errors
+                last_error = f"{type(exc).__name__}: {exc}"
+                continue
 
-    if resp is None:
-        raise SystemExit(f"Model request failed for all models: {last_error}")
+            output_text = extract_output_text(resp)
+            if not output_text.strip():
+                last_error = f"model {model} effort={effort} returned empty response"
+                continue
 
-    output_text = extract_output_text(resp)
-    if not output_text.strip():
-        print("changes: no-op (model returned empty response)")
-        usage = token_usage(resp)
-        if usage:
-            print(json.dumps(usage, separators=(",", ":")))
-        cost = maybe_cost(args, usage)
-        if cost is not None:
-            print(f"COST_USD={cost:.6f}")
-        return 0
+            try:
+                updated_source = extract_updated_source(output_text)
+            except ValueError as exc:
+                last_error = (
+                    f"model {model} effort={effort} response could not be parsed: {exc}"
+                )
+                continue
 
-    try:
-        updated_source = extract_updated_source(output_text)
-    except ValueError as exc:
-        raise SystemExit(f"Could not extract updated source from response: {exc}") from exc
-    if not updated_source.strip():
-        raise SystemExit("Extracted updated source was empty")
+            if not updated_source.strip():
+                last_error = f"model {model} effort={effort} returned empty source"
+                continue
 
-    write_text(args.strategy_file, updated_source + "\n")
+            write_text(args.strategy_file, updated_source + "\n")
+            print("changes: updated strategy file from model output")
+            usage = token_usage(resp)
+            if usage:
+                print(json.dumps(usage, separators=(",", ":")))
+            cost = maybe_cost(args, usage)
+            if cost is not None:
+                print(f"COST_USD={cost:.6f}")
+            return 0
 
-    print("changes: updated strategy file from model output")
-
-    usage = token_usage(resp)
-    if usage:
-        print(json.dumps(usage, separators=(",", ":")))
-
-    cost = maybe_cost(args, usage)
-    if cost is not None:
-        print(f"COST_USD={cost:.6f}")
-
-    return 0
+    raise SystemExit(f"Model failed to produce updated source: {last_error}")
 
 
 if __name__ == "__main__":

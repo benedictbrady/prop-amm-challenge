@@ -63,6 +63,14 @@ class AdapterError(RuntimeError):
     pass
 
 
+SBF_TOOLCHAIN_MISSING_HINTS = (
+    "no such command: `build-sbf`",
+    "no such command: build-sbf",
+    "platform-tools",
+    "bpf build failed",
+)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -195,6 +203,34 @@ def parse_metric(text: str, regex: re.Pattern[str], name: str) -> float:
     if not match:
         raise AdapterError(f"Could not parse {name} from output")
     return float(match.group(1))
+
+
+def command_result_payload(result: CommandResult) -> dict[str, Any]:
+    return {
+        "command": result.command,
+        "exit_code": result.exit_code,
+        "duration_sec": result.duration_sec,
+        "timed_out": result.timed_out,
+    }
+
+
+def should_attempt_sbf_toolchain_repair(result: CommandResult) -> bool:
+    combined = (result.stdout + "\n" + result.stderr).lower()
+    return any(hint in combined for hint in SBF_TOOLCHAIN_MISSING_HINTS)
+
+
+def repair_sbf_toolchain(
+    *,
+    workspace: Path,
+    timeout_sec: int,
+    log_dir: Path | None,
+) -> CommandResult:
+    command = "cargo build-sbf --install-only --force-tools-install"
+    result = run_command(command, cwd=workspace, timeout_sec=timeout_sec)
+    if log_dir is not None:
+        write_text(log_dir / "repair_sbf_toolchain_stdout.log", result.stdout)
+        write_text(log_dir / "repair_sbf_toolchain_stderr.log", result.stderr)
+    return result
 
 
 def command_vars(
@@ -340,6 +376,7 @@ def evaluate_payload(
             mode=mode,
             iteration=iteration,
         )
+        validation_attempts: list[dict[str, Any]] = []
         validate_result = run_command(
             validate_command,
             cwd=workspace,
@@ -348,13 +385,32 @@ def evaluate_payload(
         if log_dir is not None:
             write_text(log_dir / "validate_stdout.log", validate_result.stdout)
             write_text(log_dir / "validate_stderr.log", validate_result.stderr)
+        validation_attempts.append(command_result_payload(validate_result))
 
-        payload["validation"] = {
-            "command": validate_command,
-            "exit_code": validate_result.exit_code,
-            "duration_sec": validate_result.duration_sec,
-            "timed_out": validate_result.timed_out,
-        }
+        if (
+            validate_result.exit_code != 0
+            and should_attempt_sbf_toolchain_repair(validate_result)
+        ):
+            repair_result = repair_sbf_toolchain(
+                workspace=workspace,
+                timeout_sec=cfg.validate_timeout_sec,
+                log_dir=log_dir,
+            )
+            payload["validation_repair"] = command_result_payload(repair_result)
+
+            if repair_result.exit_code == 0:
+                validate_result = run_command(
+                    validate_command,
+                    cwd=workspace,
+                    timeout_sec=cfg.validate_timeout_sec,
+                )
+                if log_dir is not None:
+                    write_text(log_dir / "validate_retry_stdout.log", validate_result.stdout)
+                    write_text(log_dir / "validate_retry_stderr.log", validate_result.stderr)
+                validation_attempts.append(command_result_payload(validate_result))
+
+        payload["validation"] = validation_attempts[-1]
+        payload["validation_attempts"] = validation_attempts
 
         if validate_result.exit_code != 0:
             payload["validation_ok"] = False

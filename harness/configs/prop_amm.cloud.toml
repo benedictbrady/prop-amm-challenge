@@ -28,7 +28,7 @@ cached_input_per_million = 0.125
 output_per_million = 10.0
 
 [agent]
-command_template = "python3 harness/agents/openai_file_editor.py --prompt-file {prompt_file} --strategy-file {strategy_file} --model $AGENT_MODEL --reasoning-effort high --input-per-million 1.25 --cached-input-per-million 0.125 --output-per-million 10.0"
+command_template = "python3 harness/agents/openai_file_editor.py --prompt-file {prompt_file} --strategy-file {strategy_file} --model $AGENT_MODEL --reasoning-effort medium --max-output-tokens 8000 --input-per-million 1.25 --cached-input-per-million 0.125 --output-per-million 10.0"
 use_shell = true
 
 [task]
