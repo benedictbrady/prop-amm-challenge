@@ -107,6 +107,15 @@ OPENAI_API_KEY=\$openai_key
 AGENT_MODEL=${AGENT_MODEL_VALUE}
 ENV
 chmod 600 /etc/prop-amm/harness.env
+
+install -d -m 755 /etc/systemd/system/prop-amm-harness.service.d
+cat > /etc/systemd/system/prop-amm-harness.service.d/exit-codes.conf <<'UNIT'
+[Service]
+Restart=on-failure
+SuccessExitStatus=2
+RestartPreventExitStatus=2
+UNIT
+systemctl daemon-reload
 set -x
 
 if [[ "${RESTART_SERVICE}" == "true" ]]; then
