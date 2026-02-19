@@ -14,6 +14,8 @@ Options:
   --branch <name>              Branch to deploy (default: codex/aws-ec2-harness)
   --repo-dir <path>            Repo dir on instance (default: /opt/prop-amm/repo)
   --remote <name>              Git remote (default: origin)
+  --openai-param <name>        SSM parameter name for OpenAI API key (default: /prop-amm-harness/OPENAI_API_KEY)
+  --agent-model <model>        AGENT_MODEL written to env file (default: gpt-5)
   --no-restart                 Do not restart prop-amm-harness.service
   --wait-timeout <sec>         Wait timeout for command completion (default: 900)
   -h, --help                   Show help
@@ -29,6 +31,8 @@ INSTANCE_ID=""
 BRANCH="codex/aws-ec2-harness"
 REPO_DIR="/opt/prop-amm/repo"
 REMOTE_NAME="origin"
+OPENAI_PARAM="${OPENAI_PARAM:-/prop-amm-harness/OPENAI_API_KEY}"
+AGENT_MODEL_VALUE="${AGENT_MODEL:-gpt-5}"
 RESTART_SERVICE="true"
 WAIT_TIMEOUT="900"
 
@@ -44,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       REPO_DIR="$2"; shift 2 ;;
     --remote)
       REMOTE_NAME="$2"; shift 2 ;;
+    --openai-param)
+      OPENAI_PARAM="$2"; shift 2 ;;
+    --agent-model)
+      AGENT_MODEL_VALUE="$2"; shift 2 ;;
     --no-restart)
       RESTART_SERVICE="false"; shift ;;
     --wait-timeout)
@@ -71,6 +79,13 @@ set -euxo pipefail
 
 sudo -u ec2-user bash -lc '
   set -euxo pipefail
+  if ! command -v cargo >/dev/null 2>&1; then
+    curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal
+  fi
+  if [[ -f "$HOME/.cargo/env" ]]; then
+    source "$HOME/.cargo/env"
+  fi
+
   cd ${REPO_DIR}
 
   git stash push -m "runtime-strategy-before-deploy-$(date +%s)" -- programs/starter/src/lib.rs || true
@@ -84,6 +99,13 @@ sudo -u ec2-user bash -lc '
     pip install -r harness/requirements.txt
   fi
 '
+
+openai_key="\$(aws ssm get-parameter --region '${REGION}' --name '${OPENAI_PARAM}' --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || true)"
+cat > /etc/prop-amm/harness.env <<ENV
+OPENAI_API_KEY=\$openai_key
+AGENT_MODEL=${AGENT_MODEL_VALUE}
+ENV
+chmod 600 /etc/prop-amm/harness.env
 
 if [[ "${RESTART_SERVICE}" == "true" ]]; then
   systemctl restart prop-amm-harness.service || true

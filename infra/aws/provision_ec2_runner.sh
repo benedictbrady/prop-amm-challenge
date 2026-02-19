@@ -234,7 +234,7 @@ cat > "$USER_DATA_FILE" <<EOF
 set -euxo pipefail
 
 dnf update -y
-dnf install -y git jq python3 python3-pip awscli
+dnf install -y git jq curl python3 python3-pip awscli
 
 install -d -m 700 /home/ec2-user/.ssh
 chown -R ec2-user:ec2-user /home/ec2-user/.ssh
@@ -257,6 +257,7 @@ else
   su - ec2-user -c "cd /opt/prop-amm/repo && git fetch --all && git pull --ff-only"
 fi
 
+su - ec2-user -c "if ! command -v cargo >/dev/null 2>&1; then curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal; fi"
 su - ec2-user -c "cd /opt/prop-amm/repo && python3 -m venv .venv"
 su - ec2-user -c "cd /opt/prop-amm/repo && source .venv/bin/activate && pip install --upgrade pip"
 su - ec2-user -c "cd /opt/prop-amm/repo && source .venv/bin/activate && pip install -r harness/requirements.txt"
