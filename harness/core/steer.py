@@ -6,14 +6,25 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 try:
-    from harness.core.loop import load_config
-except ModuleNotFoundError:  # pragma: no cover - direct script execution fallback
-    sys.path.append(str(Path(__file__).resolve().parents[2]))
-    from harness.core.loop import load_config
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError as exc:
+        raise SystemExit("Missing TOML parser (`tomllib` or `tomli`)") from exc
+
+
+@dataclass(frozen=True)
+class SteerConfig:
+    workspace: Path
+    state_dir: Path
+    steer_file: Path | None
+    default_note_iterations: int
 
 
 def write_text(path: Path, text: str) -> None:
@@ -98,8 +109,34 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def require_steer_file(config_path: Path) -> tuple[Path, Any]:
-    cfg = load_config(config_path.resolve())
+def load_steer_config(config_path: Path) -> SteerConfig:
+    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    paths = raw.get("paths", {})
+    control = raw.get("control", {})
+
+    workspace = Path(paths.get("workspace", ".")).expanduser().resolve()
+    state_dir = (workspace / str(paths.get("state_dir", ".harness"))).resolve()
+    steer_raw = control.get("steer_file", ".harness/steer.json")
+    steer_file: Path | None
+    if steer_raw in (None, "", False):
+        steer_file = None
+    else:
+        steer_file = (workspace / str(steer_raw)).resolve()
+
+    default_note_iterations = int(control.get("default_note_iterations", 5))
+    if default_note_iterations < 1:
+        default_note_iterations = 5
+
+    return SteerConfig(
+        workspace=workspace,
+        state_dir=state_dir,
+        steer_file=steer_file,
+        default_note_iterations=default_note_iterations,
+    )
+
+
+def require_steer_file(config_path: Path) -> tuple[Path, SteerConfig]:
+    cfg = load_steer_config(config_path.resolve())
     if cfg.steer_file is None:
         raise SystemExit(
             "Steering is disabled: set [control].steer_file in config to enable operator steers."
@@ -129,7 +166,7 @@ def cmd_status(config_path: Path) -> int:
 
 
 def cmd_fresh_start(args: argparse.Namespace, config_path: Path) -> int:
-    steer_file, _cfg = require_steer_file(config_path)
+    steer_file, cfg = require_steer_file(config_path)
     payload: dict[str, Any] = {
         "action": "fresh_start",
         "apply_once": not args.persistent,
@@ -143,8 +180,12 @@ def cmd_fresh_start(args: argparse.Namespace, config_path: Path) -> int:
     }
     if args.note.strip():
         payload["note"] = args.note.strip()
-    if args.note_iterations is not None:
-        payload["note_iterations"] = max(1, args.note_iterations)
+    if args.note.strip():
+        payload["note_iterations"] = (
+            max(1, args.note_iterations)
+            if args.note_iterations is not None
+            else cfg.default_note_iterations
+        )
 
     write_text(steer_file, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"wrote steer: {steer_file}")
@@ -153,14 +194,17 @@ def cmd_fresh_start(args: argparse.Namespace, config_path: Path) -> int:
 
 
 def cmd_note(args: argparse.Namespace, config_path: Path) -> int:
-    steer_file, _cfg = require_steer_file(config_path)
+    steer_file, cfg = require_steer_file(config_path)
     payload: dict[str, Any] = {
         "action": "note",
         "apply_once": not args.persistent,
         "note": args.text.strip(),
     }
-    if args.iterations is not None:
-        payload["note_iterations"] = max(1, args.iterations)
+    payload["note_iterations"] = (
+        max(1, args.iterations)
+        if args.iterations is not None
+        else cfg.default_note_iterations
+    )
 
     write_text(steer_file, json.dumps(payload, indent=2, sort_keys=True) + "\n")
     print(f"wrote steer: {steer_file}")
