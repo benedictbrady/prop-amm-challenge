@@ -15,8 +15,8 @@ Options:
   --repo-dir <path>            Repo dir on instance (default: /opt/prop-amm/repo)
   --remote <name>              Git remote (default: origin)
   --openai-param <name>        SSM parameter name for OpenAI API key (default: /prop-amm-harness/OPENAI_API_KEY)
-  --agent-model <model>        AGENT_MODEL written to env file (default: gpt-5-codex)
-  --sysadmin-model <model>     SYSADMIN_MODEL written to env file (default: gpt-5-codex)
+  --agent-model <model>        AGENT_MODEL written to env file (default: preserve current value, fallback gpt-5-codex)
+  --sysadmin-model <model>     SYSADMIN_MODEL written to env file (default: preserve current value, fallback gpt-5-codex)
   --no-restart                 Do not restart prop-amm-harness.service
   --wait-timeout <sec>         Wait timeout for command completion (default: 900)
   -h, --help                   Show help
@@ -33,8 +33,8 @@ BRANCH="codex/aws-ec2-harness"
 REPO_DIR="/opt/prop-amm/repo"
 REMOTE_NAME="origin"
 OPENAI_PARAM="${OPENAI_PARAM:-/prop-amm-harness/OPENAI_API_KEY}"
-AGENT_MODEL_VALUE="${AGENT_MODEL:-gpt-5-codex}"
-SYSADMIN_MODEL_VALUE="${SYSADMIN_MODEL:-gpt-5-codex}"
+AGENT_MODEL_VALUE="${AGENT_MODEL:-}"
+SYSADMIN_MODEL_VALUE="${SYSADMIN_MODEL:-}"
 RESTART_SERVICE="true"
 WAIT_TIMEOUT="900"
 
@@ -118,10 +118,20 @@ sudo -u ec2-user bash -lc '
 
 set +x
 openai_key="\$(aws ssm get-parameter --region '${REGION}' --name '${OPENAI_PARAM}' --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || true)"
+current_agent_model="\$(grep '^AGENT_MODEL=' /etc/prop-amm/harness.env 2>/dev/null | cut -d= -f2- || true)"
+current_sysadmin_model="\$(grep '^SYSADMIN_MODEL=' /etc/prop-amm/harness.env 2>/dev/null | cut -d= -f2- || true)"
+agent_model_value="${AGENT_MODEL_VALUE}"
+sysadmin_model_value="${SYSADMIN_MODEL_VALUE}"
+if [[ -z "\$agent_model_value" ]]; then
+  agent_model_value="\${current_agent_model:-gpt-5-codex}"
+fi
+if [[ -z "\$sysadmin_model_value" ]]; then
+  sysadmin_model_value="\${current_sysadmin_model:-gpt-5-codex}"
+fi
 cat > /etc/prop-amm/harness.env <<ENV
 OPENAI_API_KEY=\$openai_key
-AGENT_MODEL=${AGENT_MODEL_VALUE}
-SYSADMIN_MODEL=${SYSADMIN_MODEL_VALUE}
+AGENT_MODEL=\$agent_model_value
+SYSADMIN_MODEL=\$sysadmin_model_value
 ENV
 chmod 600 /etc/prop-amm/harness.env
 

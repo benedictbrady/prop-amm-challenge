@@ -103,6 +103,8 @@ Set repo variables used by workflow:
 ```bash
 gh variable set AWS_REGION --repo danrobinson/prop-amm-agent-harness --body us-east-1
 gh variable set EC2_INSTANCE_ID --repo danrobinson/prop-amm-agent-harness --body i-0931eb5e7adf5600e
+gh variable set AGENT_MODEL --repo danrobinson/prop-amm-agent-harness --body gpt-5.3-codex
+gh variable set SYSADMIN_MODEL --repo danrobinson/prop-amm-agent-harness --body gpt-5.3-codex
 ```
 
 Then use workflow:

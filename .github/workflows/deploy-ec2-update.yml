@@ -17,6 +17,14 @@ on:
         required: false
         default: true
         type: boolean
+      agent_model:
+        description: "Agent model override (optional)"
+        required: false
+        type: string
+      sysadmin_model:
+        description: "Sysadmin model override (optional)"
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -68,9 +76,21 @@ jobs:
             RESTART_RAW="true"
           fi
 
+          AGENT_MODEL="${{ github.event.inputs.agent_model }}"
+          if [ -z "$AGENT_MODEL" ]; then
+            AGENT_MODEL="${{ vars.AGENT_MODEL }}"
+          fi
+
+          SYSADMIN_MODEL="${{ github.event.inputs.sysadmin_model }}"
+          if [ -z "$SYSADMIN_MODEL" ]; then
+            SYSADMIN_MODEL="${{ vars.SYSADMIN_MODEL }}"
+          fi
+
           echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "restart=$RESTART_RAW" >> "$GITHUB_OUTPUT"
+          echo "agent_model=$AGENT_MODEL" >> "$GITHUB_OUTPUT"
+          echo "sysadmin_model=$SYSADMIN_MODEL" >> "$GITHUB_OUTPUT"
 
       - name: Configure AWS credentials (OIDC role)
         if: ${{ vars.AWS_ROLE_TO_ASSUME != '' }}
@@ -99,6 +119,14 @@ jobs:
 
           if [ "${{ steps.resolve.outputs.restart }}" != "true" ]; then
             CMD+=(--no-restart)
+          fi
+
+          if [ -n "${{ steps.resolve.outputs.agent_model }}" ]; then
+            CMD+=(--agent-model "${{ steps.resolve.outputs.agent_model }}")
+          fi
+
+          if [ -n "${{ steps.resolve.outputs.sysadmin_model }}" ]; then
+            CMD+=(--sysadmin-model "${{ steps.resolve.outputs.sysadmin_model }}")
           fi
 
           "${CMD[@]}"
