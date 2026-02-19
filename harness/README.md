@@ -51,6 +51,41 @@ See `harness/CLOUD.md`.
 - Enable `[sysadmin]` to run a periodic high-reasoning health check and auto-remediation actions.
 - Default cloud config runs sysadmin checks every 10 minutes using `SYSADMIN_MODEL` (default `gpt-5-codex`) via `harness/agents/openai_sysadmin.py`.
 
+## Operator Steering
+
+You can inject operator commands while the harness is running:
+
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml fresh-start
+```
+
+Common commands:
+
+- Fresh start and discard current trajectory:
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml fresh-start
+```
+- Fresh start with explicit steer note:
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml fresh-start --note "Ignore prior approach. Try a different strategy family." --note-iterations 8
+```
+- Inject note without reset:
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml note --text "Prioritize low-variance improvements over peak train score." --iterations 5
+```
+- Inspect pending steer / active note:
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml status
+```
+
+Enable steering in config:
+
+```toml
+[control]
+steer_file = ".harness/steer.json"
+default_note_iterations = 5
+```
+
 ## Why this is reusable
 
 To support a new problem, keep the same loop and either:

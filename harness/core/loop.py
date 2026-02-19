@@ -159,6 +159,8 @@ class Config:
     agent_backend: str
     agent_command_template: str
     agent_use_shell: bool
+    steer_file: Path | None
+    steer_default_note_iterations: int
     task_command_template: str
     task_use_shell: bool
     sysadmin_enabled: bool
@@ -212,6 +214,7 @@ def load_config(path: Path) -> Config:
     loop = raw.get("loop", {})
     budget = raw.get("budget", {})
     agent = raw.get("agent", {})
+    control = raw.get("control", {})
     task = raw.get("task", {})
     sysadmin = raw.get("sysadmin", {})
 
@@ -264,6 +267,15 @@ def load_config(path: Path) -> Config:
     except AgentBackendError as exc:
         raise HarnessError(str(exc)) from exc
 
+    steer_file_raw = control.get("steer_file", ".harness/steer.json")
+    steer_file: Path | None
+    if steer_file_raw in (None, "", False):
+        steer_file = None
+    else:
+        steer_file = (workspace / str(steer_file_raw)).resolve()
+
+    steer_default_note_iterations = int(control.get("default_note_iterations", 5))
+
     task_command_template = str(task.get("command_template", "")).strip()
     if not task_command_template:
         raise HarnessError("task.command_template is required")
@@ -302,6 +314,8 @@ def load_config(path: Path) -> Config:
         agent_backend=resolved_agent_backend.name,
         agent_command_template=resolved_agent_backend.command_template,
         agent_use_shell=resolved_agent_backend.use_shell,
+        steer_file=steer_file,
+        steer_default_note_iterations=steer_default_note_iterations,
         task_command_template=task_command_template,
         task_use_shell=bool(task.get("use_shell", True)),
         sysadmin_enabled=sysadmin_enabled,
@@ -333,6 +347,8 @@ def load_config(path: Path) -> Config:
         raise HarnessError("budget.fallback_per_iteration_usd must be >= 0")
     if cfg.budget_fallback_on_failure < 0:
         raise HarnessError("budget.fallback_on_failure_usd must be >= 0")
+    if cfg.steer_default_note_iterations < 1:
+        raise HarnessError("control.default_note_iterations must be >= 1")
     if cfg.sysadmin_interval_seconds < 1:
         raise HarnessError("sysadmin.interval_seconds must be >= 1")
     if cfg.sysadmin_failure_streak_trigger < 0:
@@ -562,6 +578,200 @@ def migrate_cost_accounting(state: dict[str, Any], cfg: Config) -> bool:
         state["stopped_reason"] = None
     state["cost_policy_version"] = 2
     return True
+
+
+def _parse_bool_like(value: Any, *, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _active_operator_note(state: dict[str, Any]) -> str | None:
+    note = state.get("operator_note")
+    remaining = safe_int(state.get("operator_note_remaining"))
+    if not isinstance(note, str) or not note.strip():
+        return None
+    if remaining is None or remaining <= 0:
+        return None
+    return note.strip()
+
+
+def _consume_operator_note(state: dict[str, Any]) -> None:
+    remaining = safe_int(state.get("operator_note_remaining"))
+    if remaining is None:
+        return
+    if remaining <= 1:
+        state.pop("operator_note", None)
+        state.pop("operator_note_remaining", None)
+        return
+    state["operator_note_remaining"] = remaining - 1
+
+
+def _record_steering_event(state: dict[str, Any], event: dict[str, Any]) -> None:
+    events = state.setdefault("steering_events", [])
+    if not isinstance(events, list):
+        events = []
+        state["steering_events"] = events
+    events.append(event)
+    del events[:-80]
+
+
+def _archive_state_snapshot(cfg: Config, state: dict[str, Any]) -> str:
+    archive_dir = cfg.state_dir / "archives"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = archive_dir / f"state_{stamp}.json"
+    write_text(path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+    return str(path)
+
+
+def _fresh_start_strategy_reset(cfg: Config) -> str:
+    if (
+        cfg.baseline_strategy_file is not None
+        and cfg.baseline_strategy_file.exists()
+        and cfg.baseline_strategy_file.resolve() != cfg.strategy_file.resolve()
+    ):
+        shutil.copy2(cfg.baseline_strategy_file, cfg.strategy_file)
+        return f"baseline:{cfg.baseline_strategy_file}"
+
+    restore = run_command(
+        f"git checkout -- {shlex.quote(str(cfg.strategy_file))}",
+        cwd=cfg.workspace,
+        timeout_sec=60,
+        use_shell=True,
+    )
+    if restore.exit_code == 0:
+        return "git_head"
+    return "skipped:no_baseline"
+
+
+def maybe_apply_steer(
+    cfg: Config,
+    state: dict[str, Any],
+    *,
+    iteration: int,
+) -> str | None:
+    if cfg.steer_file is None or not cfg.steer_file.exists():
+        return None
+
+    try:
+        payload = json.loads(read_text(cfg.steer_file))
+    except Exception as exc:  # pragma: no cover - runtime operator input
+        msg = f"invalid steer file ({cfg.steer_file}): {type(exc).__name__}: {exc}"
+        _record_steering_event(
+            state,
+            {
+                "timestamp": now_iso(),
+                "iteration": iteration,
+                "status": "error",
+                "message": msg,
+            },
+        )
+        cfg.steer_file.unlink(missing_ok=True)
+        return msg
+
+    if not isinstance(payload, dict):
+        msg = f"invalid steer payload type: expected object, got {type(payload).__name__}"
+        _record_steering_event(
+            state,
+            {
+                "timestamp": now_iso(),
+                "iteration": iteration,
+                "status": "error",
+                "message": msg,
+            },
+        )
+        cfg.steer_file.unlink(missing_ok=True)
+        return msg
+
+    action = str(payload.get("action", "")).strip().lower()
+    if not action:
+        action = "fresh_start"
+
+    note = str(payload.get("note", "")).strip()
+    note_iterations = safe_int(payload.get("note_iterations")) or cfg.steer_default_note_iterations
+    if note_iterations < 1:
+        note_iterations = cfg.steer_default_note_iterations
+    apply_once = _parse_bool_like(payload.get("apply_once"), default=True)
+
+    message = ""
+    if action == "fresh_start":
+        archive_path = _archive_state_snapshot(cfg, state)
+        prev_budget = float(state.get("budget_spent_usd", 0.0))
+
+        if _parse_bool_like(payload.get("reset_strategy"), default=True):
+            reset_source = _fresh_start_strategy_reset(cfg)
+        else:
+            reset_source = "skipped:reset_strategy=false"
+
+        if _parse_bool_like(payload.get("clear_iterations"), default=True):
+            state["iterations"] = []
+        if _parse_bool_like(payload.get("clear_elites"), default=True):
+            state["elites"] = []
+        if _parse_bool_like(payload.get("clear_sysadmin_checks"), default=True):
+            state["sysadmin_checks"] = []
+            state.pop("sysadmin_last_iteration", None)
+            state.pop("sysadmin_last_timestamp", None)
+        if _parse_bool_like(payload.get("reset_best_metrics"), default=True):
+            state["best_train_avg"] = float("-inf")
+            state["best_holdout_avg"] = float("-inf")
+            state["best_holdout_candidate"] = None
+        if _parse_bool_like(payload.get("clear_stopped_reason"), default=True):
+            state["stopped_reason"] = None
+
+        if _parse_bool_like(payload.get("keep_budget_spent"), default=True):
+            state["budget_spent_usd"] = prev_budget
+        else:
+            state["budget_spent_usd"] = 0.0
+
+        message = (
+            "fresh_start applied: archived_state={archive} reset_strategy={reset}".format(
+                archive=archive_path,
+                reset=reset_source,
+            )
+        )
+    elif action == "note":
+        message = "note applied"
+    elif action == "clear_note":
+        state.pop("operator_note", None)
+        state.pop("operator_note_remaining", None)
+        message = "operator note cleared"
+    else:
+        message = f"unknown steer action '{action}'"
+
+    if note:
+        state["operator_note"] = note
+        state["operator_note_remaining"] = note_iterations
+        message += f"; note active for {note_iterations} iteration(s)"
+    elif action == "note":
+        state.pop("operator_note", None)
+        state.pop("operator_note_remaining", None)
+        message += "; note text empty, cleared existing note"
+
+    _record_steering_event(
+        state,
+        {
+            "timestamp": now_iso(),
+            "iteration": iteration,
+            "status": "applied",
+            "action": action,
+            "message": message,
+            "payload": payload,
+        },
+    )
+
+    if apply_once:
+        cfg.steer_file.unlink(missing_ok=True)
+
+    return message
 
 
 def recent_history_summary(state: dict[str, Any], count: int = 8) -> str:
@@ -947,6 +1157,14 @@ def render_prompt(
         if budget_limit_enabled(cfg)
         else float("inf")
     )
+    operator_note = _active_operator_note(state)
+    if operator_note is not None:
+        task_context = (
+            f"{task_context}\n\n"
+            "Operator steer (highest priority):\n"
+            f"- {operator_note}\n"
+            "- If this conflicts with your previous approach, follow this steer."
+        )
 
     return template.format(
         iteration=iteration,
@@ -1095,6 +1313,11 @@ def run_harness(cfg: Config) -> int:
     )
 
     for iteration in iteration_source:
+        steer_message = maybe_apply_steer(cfg, state, iteration=iteration)
+        if steer_message is not None:
+            save_state(state_path, state)
+            print(f"Operator steer: {steer_message}")
+
         spent = float(state.get("budget_spent_usd", 0.0))
         if budget_limit_enabled(cfg) and spent >= cfg.budget_max_usd:
             state["stopped_reason"] = "budget_exhausted"
@@ -1272,6 +1495,7 @@ def run_harness(cfg: Config) -> int:
             "budget_spent_usd": state.get("budget_spent_usd"),
         }
         state.setdefault("iterations", []).append(iteration_record)
+        _consume_operator_note(state)
         save_state(state_path, state)
 
         run_guard, trigger = should_run_sysadmin(cfg, state, iteration)
@@ -1351,6 +1575,8 @@ def dry_run(cfg: Config) -> int:
     print(f"stop_on_target: {cfg.stop_on_target}")
     print(f"agent_backend: {cfg.agent_backend}")
     print(f"agent_command_template: {cfg.agent_command_template}")
+    print(f"steer_file: {cfg.steer_file}")
+    print(f"steer_default_note_iterations: {cfg.steer_default_note_iterations}")
     print(f"task_command_template: {cfg.task_command_template}")
     print(f"sysadmin_enabled: {cfg.sysadmin_enabled}")
     if cfg.sysadmin_enabled:

@@ -21,6 +21,10 @@ max_usd = 0.0
 fallback_per_iteration_usd = 6.0
 fallback_on_failure_usd = 0.0
 
+[control]
+steer_file = ".harness/steer.json"
+default_note_iterations = 5
+
 [pricing]
 # Update these when model pricing changes.
 input_per_million = 1.25

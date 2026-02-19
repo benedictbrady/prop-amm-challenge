@@ -21,6 +21,10 @@ max_usd = 1000.0
 fallback_per_iteration_usd = 5.0
 fallback_on_failure_usd = 0.0
 
+[control]
+steer_file = ".harness/steer.json"
+default_note_iterations = 5
+
 [agent]
 # Use backend registry (preferred). Alternative: set `command_template = "..."`
 backend = "codex_cli"

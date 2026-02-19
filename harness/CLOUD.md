@@ -56,6 +56,26 @@ The loop and task adapter stay unchanged.
 
 The optional sysadmin guard uses `sysadmin.command_template` and `SYSADMIN_MODEL`.
 
+## Steering a running cloud job
+
+From the repo root on the runner, inject a fresh-start steer:
+
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml fresh-start
+```
+
+Inject a note without reset:
+
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml note --text "Start fresh and avoid previous family of solutions." --iterations 6
+```
+
+Check current steer state:
+
+```bash
+python3 harness/core/steer.py --config harness/configs/prop_amm.cloud.toml status
+```
+
 ## Option 3: Persistent AWS EC2 Runner
 
 For heavy-duty long-running jobs with shell access, use the scripts under `infra/`:
