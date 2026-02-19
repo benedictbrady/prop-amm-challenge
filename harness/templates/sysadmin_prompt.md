@@ -22,10 +22,10 @@ Allowed remediation actions:
 - `restart_from_baseline`
 
 Return ONLY JSON:
-{
+{{
   "decision": "continue",
   "health": "healthy|degraded|broken",
   "root_cause": "short diagnosis",
   "action": "noop|sleep_60|sleep_300|restart_from_baseline",
   "notes": "short operator notes"
-}
+}}
