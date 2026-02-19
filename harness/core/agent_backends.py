@@ -65,7 +65,7 @@ def _build_openai_ops_backend(
     options: Mapping[str, Any], *, pricing: Mapping[str, float] | None
 ) -> str:
     rates = _pricing_defaults(pricing)
-    model_expr = _shell_expr(options, "model_expr", default="${AGENT_MODEL:-gpt-5-codex}")
+    model_expr = _shell_expr(options, "model_expr", default="$AGENT_MODEL")
     fallback_model_expr = _shell_expr(
         options, "fallback_model_expr", default=model_expr
     )
@@ -97,7 +97,7 @@ def _build_openai_file_editor_backend(
     options: Mapping[str, Any], *, pricing: Mapping[str, float] | None
 ) -> str:
     rates = _pricing_defaults(pricing)
-    model_expr = _shell_expr(options, "model_expr", default="${AGENT_MODEL:-gpt-5-codex}")
+    model_expr = _shell_expr(options, "model_expr", default="$AGENT_MODEL")
     fallback_model_expr = _shell_expr(
         options, "fallback_model_expr", default=model_expr
     )
@@ -122,9 +122,7 @@ def _build_codex_cli_backend(
     options: Mapping[str, Any], *, pricing: Mapping[str, float] | None
 ) -> str:
     rates = _pricing_defaults(pricing)
-    model_expr = _shell_expr(
-        options, "model_expr", default="${AGENT_MODEL:-gpt-5-codex}"
-    )
+    model_expr = _shell_expr(options, "model_expr", default="$AGENT_MODEL")
     fallback_model_expr = _shell_expr(
         options, "fallback_model_expr", default=model_expr
     )

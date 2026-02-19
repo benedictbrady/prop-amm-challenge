@@ -70,7 +70,7 @@ backend = "codex_cli" # or openai_ops, openai_file_editor
 use_shell = true
 
 [agent.backend_options]
-model_expr = "${AGENT_MODEL:-gpt-5-codex}"
+model_expr = "$AGENT_MODEL"
 ```
 
 Backward compatibility:

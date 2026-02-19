@@ -272,8 +272,8 @@ def load_config(path: Path) -> Config:
     default_sysadmin_command = (
         "python3 harness/agents/openai_sysadmin.py "
         "--prompt-file {prompt_file} "
-        "--model ${SYSADMIN_MODEL:-gpt-5-codex} "
-        "--fallback-model ${SYSADMIN_MODEL:-gpt-5-codex} "
+        "--model $SYSADMIN_MODEL "
+        "--fallback-model $SYSADMIN_MODEL "
         "--reasoning-effort high "
     )
     sysadmin_command_template = str(

@@ -32,8 +32,8 @@ backend = "codex_cli"
 use_shell = true
 
 [agent.backend_options]
-model_expr = "${AGENT_MODEL:-gpt-5-codex}"
-fallback_model_expr = "${AGENT_FALLBACK_MODEL:-gpt-5-codex}"
+model_expr = "$AGENT_MODEL"
+fallback_model_expr = "$AGENT_MODEL"
 reasoning_effort = "high"
 sandbox = "danger-full-access"
 dangerously_bypass_approvals_and_sandbox = true
@@ -50,5 +50,5 @@ interval_seconds = 600
 failure_streak_trigger = 0
 timeout_sec = 300
 prompt_template = "harness/templates/sysadmin_prompt.md"
-command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model ${SYSADMIN_MODEL:-gpt-5-codex} --fallback-model ${SYSADMIN_MODEL:-gpt-5-codex} --reasoning-effort high"
+command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model $SYSADMIN_MODEL --fallback-model $SYSADMIN_MODEL --reasoning-effort high"
 use_shell = true
