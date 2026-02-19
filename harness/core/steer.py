@@ -15,8 +15,8 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     try:
         import tomli as tomllib  # type: ignore[no-redef]
-    except ModuleNotFoundError as exc:
-        raise SystemExit("Missing TOML parser (`tomllib` or `tomli`)") from exc
+    except ModuleNotFoundError:  # pragma: no cover
+        tomllib = None  # type: ignore[assignment]
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,60 @@ class SteerConfig:
     state_dir: Path
     steer_file: Path | None
     default_note_iterations: int
+
+
+def _strip_comment(line: str) -> str:
+    in_quote = False
+    out_chars: list[str] = []
+    for ch in line:
+        if ch == '"':
+            in_quote = not in_quote
+            out_chars.append(ch)
+            continue
+        if ch == "#" and not in_quote:
+            break
+        out_chars.append(ch)
+    return "".join(out_chars).strip()
+
+
+def _parse_toml_scalar(raw_value: str) -> Any:
+    value = raw_value.strip()
+    if value.startswith('"') and value.endswith('"') and len(value) >= 2:
+        return value[1:-1]
+    if value.lower() in {"true", "false"}:
+        return value.lower() == "true"
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _parse_minimal_toml(text: str) -> dict[str, Any]:
+    root: dict[str, Any] = {}
+    current: dict[str, Any] = root
+    for raw_line in text.splitlines():
+        line = _strip_comment(raw_line)
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            if not section:
+                continue
+            current = root.setdefault(section, {})
+            if not isinstance(current, dict):
+                current = {}
+                root[section] = current
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not key:
+            continue
+        current[key] = _parse_toml_scalar(value)
+    return root
 
 
 def write_text(path: Path, text: str) -> None:
@@ -110,7 +164,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def load_steer_config(config_path: Path) -> SteerConfig:
-    raw = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    text = config_path.read_text(encoding="utf-8")
+    if tomllib is not None:
+        raw = tomllib.loads(text)
+    else:
+        raw = _parse_minimal_toml(text)
     paths = raw.get("paths", {})
     control = raw.get("control", {})
 
