@@ -55,3 +55,5 @@ For heavy-duty long-running jobs with shell access, use the scripts under `infra
 - `infra/aws/create_budget_guardrail.sh`
 
 Full guide: `infra/docs/AWS_GITHUB_SETUP.md`.
+
+For GitHub-triggered EC2 updates, use `.github/workflows/deploy-ec2-update.yml`.

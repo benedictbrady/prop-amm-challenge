@@ -328,6 +328,7 @@ This repo includes AWS + GitHub automation scripts under `infra/` for running th
 - Create private repo + deploy key: `infra/github/*`
 - Provision EC2 + SSM + systemd harness service: `infra/aws/provision_ec2_runner.sh`
 - Add budget guardrail alerts: `infra/aws/create_budget_guardrail.sh`
+- Configure GitHub Action deployments: `infra/aws/setup_github_actions_oidc.sh`
 - Teardown resources: `infra/aws/teardown_runner.sh`
 
 See `infra/docs/AWS_GITHUB_SETUP.md` for the end-to-end flow.

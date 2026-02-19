@@ -1,0 +1,108 @@
+name: deploy-ec2-update
+
+on:
+  workflow_dispatch:
+    inputs:
+      instance_id:
+        description: "EC2 instance ID (optional if repo var EC2_INSTANCE_ID is set)"
+        required: false
+        type: string
+      branch:
+        description: "Branch to deploy"
+        required: false
+        default: "codex/aws-ec2-harness"
+        type: string
+      restart_service:
+        description: "Restart harness service after update"
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches:
+      - main
+      - codex/aws-ec2-harness
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-ec2-update-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION != '' && vars.AWS_REGION || 'us-east-1' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve deploy inputs
+        id: resolve
+        run: |
+          INSTANCE_ID="${{ github.event.inputs.instance_id }}"
+          if [ -z "$INSTANCE_ID" ]; then
+            INSTANCE_ID="${{ vars.EC2_INSTANCE_ID }}"
+          fi
+          if [ -z "$INSTANCE_ID" ]; then
+            INSTANCE_ID="${{ secrets.EC2_INSTANCE_ID }}"
+          fi
+
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "Missing instance id. Set workflow input or repo var EC2_INSTANCE_ID." >&2
+            exit 1
+          fi
+
+          BRANCH="${{ github.event.inputs.branch }}"
+          if [ -z "$BRANCH" ]; then
+            BRANCH="${GITHUB_REF_NAME}"
+          fi
+
+          RESTART_RAW="${{ github.event.inputs.restart_service }}"
+          if [ -z "$RESTART_RAW" ]; then
+            RESTART_RAW="true"
+          fi
+
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "restart=$RESTART_RAW" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (OIDC role)
+        if: ${{ vars.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (access keys fallback)
+        if: ${{ vars.AWS_ROLE_TO_ASSUME == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy update to EC2 via SSM
+        run: |
+          CMD=(
+            ./infra/aws/update_runner_from_github.sh
+            --region "$AWS_REGION"
+            --instance-id "${{ steps.resolve.outputs.instance_id }}"
+            --branch "${{ steps.resolve.outputs.branch }}"
+          )
+
+          if [ "${{ steps.resolve.outputs.restart }}" != "true" ]; then
+            CMD+=(--no-restart)
+          fi
+
+          "${CMD[@]}"
+
+      - name: Summarize
+        run: |
+          echo "Deployed branch '${{ steps.resolve.outputs.branch }}' to instance '${{ steps.resolve.outputs.instance_id }}' in ${AWS_REGION}."

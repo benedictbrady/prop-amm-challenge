@@ -11,6 +11,8 @@ Automation scripts for provisioning a dedicated AWS EC2 harness runner and wirin
 
 - `infra/aws/provision_ec2_runner.sh`
 - `infra/aws/create_budget_guardrail.sh`
+- `infra/aws/setup_github_actions_oidc.sh`
+- `infra/aws/update_runner_from_github.sh`
 - `infra/aws/teardown_runner.sh`
 
 ## End-to-end guide

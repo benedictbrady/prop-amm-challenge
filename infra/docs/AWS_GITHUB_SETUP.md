@@ -85,6 +85,33 @@ sudo tail -f /var/log/prop-amm-harness.log
   --email you@example.com
 ```
 
+## 7) Configure GitHub Action-triggered updates (recommended: OIDC)
+
+Create AWS OIDC deploy role and wire it to the private repo:
+
+```bash
+./infra/aws/setup_github_actions_oidc.sh \
+  --region us-east-1 \
+  --repo danrobinson/prop-amm-agent-harness \
+  --instance-id i-0931eb5e7adf5600e \
+  --set-repo-variable
+```
+
+Set repo variables used by workflow:
+
+```bash
+gh variable set AWS_REGION --repo danrobinson/prop-amm-agent-harness --body us-east-1
+gh variable set EC2_INSTANCE_ID --repo danrobinson/prop-amm-agent-harness --body i-0931eb5e7adf5600e
+```
+
+Then use workflow:
+
+- `.github/workflows/deploy-ec2-update.yml`
+- triggers on push to `main` / `codex/aws-ec2-harness`
+- also supports manual dispatch with custom branch/instance
+
+Fallback (if you do not use OIDC): set repo secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optional `AWS_SESSION_TOKEN`.
+
 ## Notes
 
 - Harness state persists in repo workspace under `.harness/`.
