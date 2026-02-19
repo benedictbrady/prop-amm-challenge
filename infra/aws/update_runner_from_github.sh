@@ -112,8 +112,8 @@ install -d -m 755 /etc/systemd/system/prop-amm-harness.service.d
 cat > /etc/systemd/system/prop-amm-harness.service.d/exit-codes.conf <<'UNIT'
 [Service]
 Restart=on-failure
-SuccessExitStatus=2
-RestartPreventExitStatus=2
+SuccessExitStatus=2 3
+RestartPreventExitStatus=2 3
 UNIT
 systemctl daemon-reload
 set -x

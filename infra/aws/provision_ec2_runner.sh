@@ -286,8 +286,8 @@ EnvironmentFile=-/etc/prop-amm/harness.env
 ExecStart=/bin/bash -lc 'source /opt/prop-amm/repo/.venv/bin/activate && python3 harness/core/loop.py --config ${CONFIG_PATH}'
 Restart=on-failure
 RestartSec=20
-SuccessExitStatus=2
-RestartPreventExitStatus=2
+SuccessExitStatus=2 3
+RestartPreventExitStatus=2 3
 StandardOutput=append:/var/log/prop-amm-harness.log
 StandardError=append:/var/log/prop-amm-harness.log
 
