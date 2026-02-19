@@ -939,6 +939,7 @@ def render_prompt(
         budget_remaining=remaining,
         budget_spent=spent,
         recent_history=recent_history_summary(state),
+        recent_failures=recent_failure_summary(state),
         elite_summary=elite_summary(state),
     )
 
