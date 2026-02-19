@@ -452,10 +452,14 @@ def extract_first(patterns: list[re.Pattern[str]], text: str) -> int | None:
 
 
 def parse_agent_cost(text: str, pricing: PricingSpec | None) -> float | None:
+    latest_match: tuple[int, float] | None = None
     for pattern in COST_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return float(match.group(1))
+        for match in pattern.finditer(text):
+            value = float(match.group(1))
+            latest_match = (match.start(), value)
+
+    if latest_match is not None:
+        return latest_match[1]
 
     if pricing is None:
         return None
