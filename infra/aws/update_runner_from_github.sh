@@ -136,7 +136,10 @@ ENV
 chmod 600 /etc/prop-amm/harness.env
 
 if [[ -n "\$openai_key" && "\$openai_key" != "None" ]]; then
-  sudo -u ec2-user env OPENAI_API_KEY="\$openai_key" bash -lc 'printf "%s" "\$OPENAI_API_KEY" | codex login --with-api-key >/dev/null 2>/dev/null || true'
+  login_status="\$(sudo -u ec2-user bash -lc 'codex login status 2>&1 || true')"
+  if ! echo "\$login_status" | grep -qi "Logged in using"; then
+    sudo -u ec2-user env OPENAI_API_KEY="\$openai_key" bash -lc 'printf "%s" "\$OPENAI_API_KEY" | codex login --with-api-key >/dev/null 2>/dev/null || true'
+  fi
 fi
 
 install -d -m 755 /etc/systemd/system/prop-amm-harness.service.d
