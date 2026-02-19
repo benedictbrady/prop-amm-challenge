@@ -532,6 +532,11 @@ def migrate_cost_accounting(state: dict[str, Any], cfg: Config) -> bool:
         item["budget_spent_usd"] = running_spend
 
     state["budget_spent_usd"] = running_spend
+    if (
+        state.get("stopped_reason") == "budget_exhausted"
+        and running_spend < cfg.budget_max_usd
+    ):
+        state["stopped_reason"] = None
     state["cost_policy_version"] = 2
     return True
 
