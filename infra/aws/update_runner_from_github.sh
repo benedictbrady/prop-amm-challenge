@@ -100,12 +100,14 @@ sudo -u ec2-user bash -lc '
   fi
 '
 
+set +x
 openai_key="\$(aws ssm get-parameter --region '${REGION}' --name '${OPENAI_PARAM}' --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || true)"
 cat > /etc/prop-amm/harness.env <<ENV
 OPENAI_API_KEY=\$openai_key
 AGENT_MODEL=${AGENT_MODEL_VALUE}
 ENV
 chmod 600 /etc/prop-amm/harness.env
+set -x
 
 if [[ "${RESTART_SERVICE}" == "true" ]]; then
   systemctl restart prop-amm-harness.service || true

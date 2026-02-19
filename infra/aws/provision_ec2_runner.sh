@@ -263,12 +263,14 @@ su - ec2-user -c "cd /opt/prop-amm/repo && source .venv/bin/activate && pip inst
 su - ec2-user -c "cd /opt/prop-amm/repo && source .venv/bin/activate && pip install -r harness/requirements.txt"
 
 install -d -m 755 /etc/prop-amm
+set +x
 openai_key="\$(aws ssm get-parameter --region '${REGION}' --name '${OPENAI_PARAM}' --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || true)"
 cat > /etc/prop-amm/harness.env <<ENV
 OPENAI_API_KEY=\$openai_key
 AGENT_MODEL=${AGENT_MODEL}
 ENV
 chmod 600 /etc/prop-amm/harness.env
+set -x
 
 cat > /etc/systemd/system/prop-amm-harness.service <<'SERVICE'
 [Unit]
