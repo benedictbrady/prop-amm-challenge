@@ -1,0 +1,34 @@
+[paths]
+workspace = "."
+strategy_file = "programs/starter/src/lib.rs"
+baseline_strategy_file = "programs/starter/src/lib.rs"
+state_dir = ".harness"
+prompt_template = "harness/templates/default_prompt.md"
+
+[loop]
+max_iterations = 220
+agent_timeout_sec = 1500
+task_timeout_sec = 1800
+stagnation_window = 8
+stagnation_min_delta = 2.0
+diversification_interval = 5
+restart_interval = 11
+elite_pool_size = 8
+
+[budget]
+max_usd = 1000.0
+fallback_per_iteration_usd = 6.0
+
+[pricing]
+# Update these when model pricing changes.
+input_per_million = 1.25
+cached_input_per_million = 0.125
+output_per_million = 10.0
+
+[agent]
+command_template = "python3 harness/agents/openai_file_editor.py --prompt-file {prompt_file} --strategy-file {strategy_file} --model ${AGENT_MODEL:-gpt-5} --reasoning-effort high --input-per-million 1.25 --cached-input-per-million 0.125 --output-per-million 10.0"
+use_shell = true
+
+[task]
+command_template = "python3 harness/tasks/prop_amm/adapter.py --config harness/tasks/prop_amm/task.toml --action {action} --workspace {workspace} --strategy-file {strategy_file} --mode {mode} --iteration {iteration} --log-dir {iter_dir}/task"
+use_shell = true

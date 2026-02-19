@@ -1,0 +1,96 @@
+name: harness-cloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Harness config path"
+        required: false
+        default: "harness/configs/prop_amm.cloud.toml"
+        type: string
+      dry_run:
+        description: "Run dry-run only"
+        required: false
+        default: false
+        type: boolean
+      agent_model:
+        description: "Model for OpenAI file editor backend"
+        required: false
+        default: "gpt-5"
+        type: string
+
+concurrency:
+  group: harness-cloud-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install -r harness/requirements.txt
+
+      - name: Restore harness state cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .harness/
+          key: harness-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            harness-state-${{ github.ref_name }}-
+
+      - name: Verify API key
+        run: |
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo "OPENAI_API_KEY secret is required." >&2
+            exit 1
+          fi
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Run harness
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          AGENT_MODEL: ${{ github.event.inputs.agent_model }}
+          CONFIG_PATH: ${{ github.event.inputs.config_path }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          CONFIG_PATH="${CONFIG_PATH:-harness/configs/prop_amm.cloud.toml}"
+          DRY_RUN="${DRY_RUN:-false}"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            python3 harness/core/loop.py --config "$CONFIG_PATH" --dry-run
+          else
+            python3 harness/core/loop.py --config "$CONFIG_PATH"
+          fi
+
+      - name: Upload harness artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-state-${{ github.run_id }}
+          path: |
+            .harness/
+            programs/starter/src/lib.rs
+          if-no-files-found: warn
+
+      - name: Save harness state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .harness/
+          key: harness-state-${{ github.ref_name }}-${{ github.run_id }}

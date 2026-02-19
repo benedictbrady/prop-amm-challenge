@@ -2,3 +2,9 @@
 **/target
 .DS_Store
 .build/
+.harness/
+.harness*/
+harness/config.toml
+harness/configs/*.local.toml
+.secrets/
+*.pem

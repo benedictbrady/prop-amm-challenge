@@ -1,0 +1,35 @@
+[paths]
+workspace = "."
+strategy_file = "programs/starter/src/lib.rs"
+baseline_strategy_file = "programs/starter/src/lib.rs"
+state_dir = ".harness"
+prompt_template = "harness/templates/default_prompt.md"
+
+[loop]
+max_iterations = 200
+agent_timeout_sec = 1800
+task_timeout_sec = 1800
+stagnation_window = 8
+stagnation_min_delta = 2.0
+diversification_interval = 5
+restart_interval = 11
+elite_pool_size = 6
+
+[budget]
+max_usd = 1000.0
+fallback_per_iteration_usd = 5.0
+
+[agent]
+# Replace with your local coding agent runtime command.
+command_template = "codex exec --non-interactive --prompt-file {prompt_file}"
+use_shell = true
+
+[task]
+command_template = "python3 harness/tasks/prop_amm/adapter.py --config harness/tasks/prop_amm/task.toml --action {action} --workspace {workspace} --strategy-file {strategy_file} --mode {mode} --iteration {iteration} --log-dir {iter_dir}/task"
+use_shell = true
+
+# Optional token pricing for tighter budget accounting.
+# [pricing]
+# input_per_million = 1.50
+# cached_input_per_million = 0.375
+# output_per_million = 6.00

@@ -1,0 +1,997 @@
+#!/usr/bin/env python3
+"""
+Agent harness for Prop AMM challenge.
+
+This runner keeps invoking a coding agent, evaluating the edited strategy,
+and stopping only when the out-of-sample 1000-sim holdout score clears a
+configurable target or the budget/iteration cap is reached.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import shlex
+import shutil
+import statistics
+import subprocess
+import sys
+import textwrap
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+try:
+    import tomllib  # type: ignore[attr-defined]
+except ModuleNotFoundError:  # pragma: no cover
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError as exc:
+        raise SystemExit("Missing TOML parser (`tomllib` or `tomli`)") from exc
+
+AVG_EDGE_RE = re.compile(r"Avg edge:\s*([-+]?\d+(?:\.\d+)?)")
+TOTAL_EDGE_RE = re.compile(r"Total edge:\s*([-+]?\d+(?:\.\d+)?)")
+
+COST_PATTERNS = [
+    re.compile(r"(?:TOTAL_)?COST_USD\s*[:=]\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE),
+    re.compile(r'"cost_usd"\s*:\s*([-+]?\d+(?:\.\d+)?)', re.IGNORECASE),
+]
+
+TOKEN_PATTERNS = {
+    "input": [
+        re.compile(r'"input_tokens"\s*:\s*(\d+)', re.IGNORECASE),
+        re.compile(r"\binput_tokens\b\s*[:=]\s*(\d+)", re.IGNORECASE),
+        re.compile(r"\bprompt_tokens\b\s*[:=]\s*(\d+)", re.IGNORECASE),
+    ],
+    "cached_input": [
+        re.compile(r'"cached_input_tokens"\s*:\s*(\d+)', re.IGNORECASE),
+        re.compile(r"\bcached_input_tokens\b\s*[:=]\s*(\d+)", re.IGNORECASE),
+    ],
+    "output": [
+        re.compile(r'"output_tokens"\s*:\s*(\d+)', re.IGNORECASE),
+        re.compile(r"\boutput_tokens\b\s*[:=]\s*(\d+)", re.IGNORECASE),
+        re.compile(r"\bcompletion_tokens\b\s*[:=]\s*(\d+)", re.IGNORECASE),
+    ],
+}
+
+DEFAULT_PROMPT_TEMPLATE = textwrap.dedent(
+    """\
+    You are optimizing /Users/dan/.codex/worktrees/7efe/prop-amm-challenge for a holdout target.
+
+    Iteration: {iteration}
+    Mode: {mode}
+    Mode instructions: {mode_instructions}
+
+    File to edit: {strategy_file}
+
+    Hard objective:
+    - Pass holdout avg edge > {target_holdout:.2f} on 1000 sims (out-of-sample seeds).
+
+    Constraints:
+    - Keep monotonic + concave outputs.
+    - Keep safe Rust only.
+    - Do not run 1000-sim holdout yourself; the harness handles holdout gating.
+    - Prioritize robust improvements across train folds instead of fitting one seed range.
+
+    Current budget:
+    - Remaining USD: {budget_remaining:.2f}
+    - Spent USD: {budget_spent:.2f}
+
+    Train folds:
+    {train_fold_summary}
+
+    Holdout fold:
+    {holdout_fold_summary}
+
+    Recent history:
+    {recent_history}
+
+    Elite candidates:
+    {elite_summary}
+
+    Required response at end:
+    1) short changelog
+    2) why this should improve robustness
+    3) optional cost line: COST_USD=<number>
+    """
+)
+
+
+@dataclass
+class FoldSpec:
+    name: str
+    simulations: int
+    steps: int
+    seed_start: int
+    seed_stride: int
+
+
+@dataclass
+class PricingSpec:
+    input_per_million: float
+    cached_input_per_million: float
+    output_per_million: float
+
+
+@dataclass
+class Config:
+    workspace: Path
+    strategy_file: Path
+    baseline_strategy_file: Path | None
+    state_dir: Path
+    prompt_template_path: Path | None
+    max_iterations: int
+    agent_timeout_sec: int
+    eval_timeout_sec: int
+    target_holdout_avg: float
+    train_folds: list[FoldSpec]
+    holdout_fold: FoldSpec
+    min_train_avg_for_holdout: float
+    min_train_worst_for_holdout: float
+    validate_before_eval: bool
+    validate_command_template: str
+    run_command_template: str
+    agent_command_template: str
+    agent_use_shell: bool
+    budget_max_usd: float
+    budget_fallback_per_iteration: float
+    pricing: PricingSpec | None
+    stagnation_window: int
+    stagnation_min_delta: float
+    diversification_interval: int
+    restart_interval: int
+    elite_pool_size: int
+
+
+@dataclass
+class CommandResult:
+    command: str
+    exit_code: int
+    stdout: str
+    stderr: str
+    duration_sec: float
+    timed_out: bool
+
+
+class HarnessError(RuntimeError):
+    pass
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def parse_fold(raw: dict[str, Any], *, idx: int, section: str) -> FoldSpec:
+    required = ["simulations", "steps", "seed_start", "seed_stride"]
+    for key in required:
+        if key not in raw:
+            raise HarnessError(f"Missing {section}[{idx}].{key}")
+
+    name = str(raw.get("name", f"{section}_{idx}"))
+    simulations = int(raw["simulations"])
+    steps = int(raw["steps"])
+    seed_start = int(raw["seed_start"])
+    seed_stride = int(raw["seed_stride"])
+
+    if simulations <= 0:
+        raise HarnessError(f"{section}[{idx}].simulations must be > 0")
+    if steps <= 0:
+        raise HarnessError(f"{section}[{idx}].steps must be > 0")
+    if seed_stride <= 0:
+        raise HarnessError(f"{section}[{idx}].seed_stride must be > 0")
+
+    return FoldSpec(
+        name=name,
+        simulations=simulations,
+        steps=steps,
+        seed_start=seed_start,
+        seed_stride=seed_stride,
+    )
+
+
+def load_config(path: Path) -> Config:
+    raw = tomllib.loads(read_text(path))
+
+    paths = raw.get("paths", {})
+    loop = raw.get("loop", {})
+    target = raw.get("target", {})
+    eval_cfg = raw.get("evaluation", {})
+    agent = raw.get("agent", {})
+    budget = raw.get("budget", {})
+
+    workspace = Path(paths.get("workspace", ".")).expanduser().resolve()
+
+    strategy_file_raw = paths.get("strategy_file")
+    if not strategy_file_raw:
+        raise HarnessError("paths.strategy_file is required")
+    strategy_file = (workspace / strategy_file_raw).resolve()
+
+    baseline_raw = paths.get("baseline_strategy_file")
+    baseline_strategy_file = (
+        (workspace / baseline_raw).resolve() if baseline_raw is not None else None
+    )
+
+    state_dir_raw = paths.get("state_dir", ".harness")
+    state_dir = (workspace / state_dir_raw).resolve()
+
+    prompt_template_raw = paths.get("prompt_template")
+    prompt_template_path = (
+        (workspace / prompt_template_raw).resolve()
+        if prompt_template_raw is not None
+        else None
+    )
+
+    train_raw = raw.get("train_folds")
+    if not isinstance(train_raw, list) or not train_raw:
+        raise HarnessError("train_folds must be a non-empty array of tables")
+    train_folds = [
+        parse_fold(item, idx=i, section="train_folds") for i, item in enumerate(train_raw)
+    ]
+
+    holdout_raw = raw.get("holdout_fold")
+    if not isinstance(holdout_raw, dict):
+        raise HarnessError("holdout_fold table is required")
+    holdout_fold = parse_fold(holdout_raw, idx=0, section="holdout_fold")
+
+    pricing = None
+    if "pricing" in raw:
+        p = raw["pricing"]
+        pricing = PricingSpec(
+            input_per_million=float(p["input_per_million"]),
+            cached_input_per_million=float(p["cached_input_per_million"]),
+            output_per_million=float(p["output_per_million"]),
+        )
+
+    cfg = Config(
+        workspace=workspace,
+        strategy_file=strategy_file,
+        baseline_strategy_file=baseline_strategy_file,
+        state_dir=state_dir,
+        prompt_template_path=prompt_template_path,
+        max_iterations=int(loop.get("max_iterations", 200)),
+        agent_timeout_sec=int(loop.get("agent_timeout_sec", 1800)),
+        eval_timeout_sec=int(loop.get("eval_timeout_sec", 1800)),
+        target_holdout_avg=float(target.get("holdout_avg_edge", 525.0)),
+        train_folds=train_folds,
+        holdout_fold=holdout_fold,
+        min_train_avg_for_holdout=float(target.get("min_train_avg_for_holdout", 505.0)),
+        min_train_worst_for_holdout=float(target.get("min_train_worst_for_holdout", 470.0)),
+        validate_before_eval=bool(eval_cfg.get("validate_before_eval", True)),
+        validate_command_template=str(
+            eval_cfg.get(
+                "validate_command_template",
+                "cargo run -q -p prop-amm -- validate {strategy_file}",
+            )
+        ),
+        run_command_template=str(
+            eval_cfg.get(
+                "run_command_template",
+                "cargo run -q -p prop-amm -- run {strategy_file} --simulations {simulations} --steps {steps} --seed-start {seed_start} --seed-stride {seed_stride}",
+            )
+        ),
+        agent_command_template=str(
+            agent.get("command_template", "codex exec --non-interactive --prompt-file {prompt_file}")
+        ),
+        agent_use_shell=bool(agent.get("use_shell", True)),
+        budget_max_usd=float(budget.get("max_usd", 1000.0)),
+        budget_fallback_per_iteration=float(budget.get("fallback_per_iteration_usd", 5.0)),
+        pricing=pricing,
+        stagnation_window=int(loop.get("stagnation_window", 8)),
+        stagnation_min_delta=float(loop.get("stagnation_min_delta", 2.0)),
+        diversification_interval=int(loop.get("diversification_interval", 5)),
+        restart_interval=int(loop.get("restart_interval", 11)),
+        elite_pool_size=int(loop.get("elite_pool_size", 6)),
+    )
+
+    if cfg.max_iterations <= 0:
+        raise HarnessError("loop.max_iterations must be > 0")
+    if cfg.agent_timeout_sec <= 0:
+        raise HarnessError("loop.agent_timeout_sec must be > 0")
+    if cfg.eval_timeout_sec <= 0:
+        raise HarnessError("loop.eval_timeout_sec must be > 0")
+    if cfg.budget_max_usd <= 0:
+        raise HarnessError("budget.max_usd must be > 0")
+    if cfg.budget_fallback_per_iteration < 0:
+        raise HarnessError("budget.fallback_per_iteration_usd must be >= 0")
+    if cfg.stagnation_window < 2:
+        raise HarnessError("loop.stagnation_window must be >= 2")
+    if cfg.diversification_interval < 2:
+        raise HarnessError("loop.diversification_interval must be >= 2")
+    if cfg.restart_interval < 2:
+        raise HarnessError("loop.restart_interval must be >= 2")
+    if cfg.elite_pool_size < 1:
+        raise HarnessError("loop.elite_pool_size must be >= 1")
+
+    if not cfg.workspace.exists():
+        raise HarnessError(f"workspace does not exist: {cfg.workspace}")
+    if not cfg.strategy_file.exists():
+        raise HarnessError(f"strategy file does not exist: {cfg.strategy_file}")
+    if cfg.baseline_strategy_file is not None and not cfg.baseline_strategy_file.exists():
+        raise HarnessError(
+            f"baseline strategy file does not exist: {cfg.baseline_strategy_file}"
+        )
+    if cfg.prompt_template_path is not None and not cfg.prompt_template_path.exists():
+        raise HarnessError(f"prompt template does not exist: {cfg.prompt_template_path}")
+
+    return cfg
+
+
+def load_state(state_path: Path) -> dict[str, Any]:
+    if not state_path.exists():
+        return {
+            "version": 1,
+            "created_at": now_iso(),
+            "updated_at": now_iso(),
+            "budget_spent_usd": 0.0,
+            "iterations": [],
+            "elites": [],
+            "best_train_avg": float("-inf"),
+            "best_holdout_avg": float("-inf"),
+            "best_holdout_candidate": None,
+            "stopped_reason": None,
+        }
+
+    return json.loads(read_text(state_path))
+
+
+def save_state(state_path: Path, state: dict[str, Any]) -> None:
+    state["updated_at"] = now_iso()
+    write_text(state_path, json.dumps(state, indent=2, sort_keys=True) + "\n")
+
+
+def run_command(
+    command: str,
+    *,
+    cwd: Path,
+    timeout_sec: int,
+    use_shell: bool,
+) -> CommandResult:
+    started = datetime.now(timezone.utc)
+
+    try:
+        if use_shell:
+            proc = subprocess.run(
+                command,
+                cwd=cwd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        else:
+            proc = subprocess.run(
+                shlex.split(command),
+                cwd=cwd,
+                shell=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+        duration = (datetime.now(timezone.utc) - started).total_seconds()
+        return CommandResult(
+            command=command,
+            exit_code=proc.returncode,
+            stdout=proc.stdout,
+            stderr=proc.stderr,
+            duration_sec=duration,
+            timed_out=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration = (datetime.now(timezone.utc) - started).total_seconds()
+        stdout = exc.stdout or ""
+        stderr = exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", errors="replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        return CommandResult(
+            command=command,
+            exit_code=124,
+            stdout=stdout,
+            stderr=stderr,
+            duration_sec=duration,
+            timed_out=True,
+        )
+
+
+def parse_metric(text: str, regex: re.Pattern[str], name: str) -> float:
+    match = regex.search(text)
+    if not match:
+        raise HarnessError(f"Could not parse {name} from command output")
+    return float(match.group(1))
+
+
+def extract_first(patterns: list[re.Pattern[str]], text: str) -> int | None:
+    for pattern in patterns:
+        match = pattern.search(text)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def parse_agent_cost(text: str, pricing: PricingSpec | None) -> float | None:
+    for pattern in COST_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return float(match.group(1))
+
+    if pricing is None:
+        return None
+
+    input_tokens = extract_first(TOKEN_PATTERNS["input"], text)
+    cached_input_tokens = extract_first(TOKEN_PATTERNS["cached_input"], text) or 0
+    output_tokens = extract_first(TOKEN_PATTERNS["output"], text)
+
+    if input_tokens is None and output_tokens is None:
+        return None
+
+    input_tokens = input_tokens or 0
+    output_tokens = output_tokens or 0
+
+    cost = (
+        (input_tokens / 1_000_000.0) * pricing.input_per_million
+        + (cached_input_tokens / 1_000_000.0) * pricing.cached_input_per_million
+        + (output_tokens / 1_000_000.0) * pricing.output_per_million
+    )
+    return cost
+
+
+def folds_summary(folds: list[FoldSpec]) -> str:
+    lines = []
+    for fold in folds:
+        lines.append(
+            f"- {fold.name}: sims={fold.simulations}, steps={fold.steps}, seeds={fold.seed_start} + i*{fold.seed_stride}"
+        )
+    return "\n".join(lines)
+
+
+def recent_history_summary(state: dict[str, Any], count: int = 8) -> str:
+    iterations = state.get("iterations", [])
+    if not iterations:
+        return "- none yet"
+
+    lines = []
+    for item in iterations[-count:]:
+        idx = item.get("iteration")
+        mode = item.get("mode")
+        train_avg = item.get("train_avg")
+        holdout_avg = item.get("holdout_avg")
+        promoted = item.get("promoted_to_holdout")
+        lines.append(
+            "- i={idx} mode={mode} train_avg={train_avg} promoted={promoted} holdout_avg={holdout}".format(
+                idx=idx,
+                mode=mode,
+                train_avg="n/a" if train_avg is None else f"{train_avg:.2f}",
+                promoted=bool(promoted),
+                holdout="n/a" if holdout_avg is None else f"{holdout_avg:.2f}",
+            )
+        )
+    return "\n".join(lines)
+
+
+def elite_summary(state: dict[str, Any], count: int = 5) -> str:
+    elites = state.get("elites", [])
+    if not elites:
+        return "- none yet"
+
+    lines = []
+    for item in elites[:count]:
+        lines.append(
+            "- i={iteration} train_avg={train_avg:.2f} train_worst={train_worst:.2f} hash={digest} file={path}".format(
+                iteration=item["iteration"],
+                train_avg=item["train_avg"],
+                train_worst=item["train_worst"],
+                digest=item["strategy_hash"][:10],
+                path=item["candidate_file"],
+            )
+        )
+    return "\n".join(lines)
+
+
+def choose_mode(state: dict[str, Any], cfg: Config, iteration: int) -> str:
+    if iteration > 0 and iteration % cfg.restart_interval == 0:
+        return "restart"
+
+    if iteration > 0 and iteration % cfg.diversification_interval == 0:
+        return "diversify"
+
+    scores = [
+        it["train_avg"]
+        for it in state.get("iterations", [])
+        if isinstance(it.get("train_avg"), (int, float))
+    ]
+
+    if len(scores) >= cfg.stagnation_window:
+        prior = scores[:-cfg.stagnation_window]
+        recent = scores[-cfg.stagnation_window :]
+        prior_best = max(prior) if prior else recent[0]
+        recent_best = max(recent)
+        if recent_best - prior_best < cfg.stagnation_min_delta:
+            return "diversify"
+
+    return "exploit"
+
+
+def maybe_reset_strategy(cfg: Config, state: dict[str, Any], mode: str) -> str | None:
+    if mode != "restart":
+        return None
+
+    elites = state.get("elites", [])
+    source: Path | None = None
+
+    if len(elites) >= 2:
+        source = Path(elites[1]["candidate_file"])
+    elif cfg.baseline_strategy_file is not None:
+        source = cfg.baseline_strategy_file
+
+    if source is None or not source.exists():
+        return None
+
+    shutil.copy2(source, cfg.strategy_file)
+    return str(source)
+
+
+def mode_instructions(mode: str) -> str:
+    if mode == "exploit":
+        return "Refine the current best idea and tighten weak edge cases."
+    if mode == "diversify":
+        return (
+            "Avoid small parameter nudges. Try a meaningfully different policy family, "
+            "state usage, or fee-shape logic while preserving monotonicity/concavity."
+        )
+    if mode == "restart":
+        return (
+            "Treat this as a controlled restart from a different anchor. Preserve only "
+            "high-confidence insights; avoid converging back immediately."
+        )
+    return "Improve robustness."
+
+
+def render_prompt(cfg: Config, state: dict[str, Any], iteration: int, mode: str) -> str:
+    template = (
+        read_text(cfg.prompt_template_path)
+        if cfg.prompt_template_path is not None
+        else DEFAULT_PROMPT_TEMPLATE
+    )
+
+    spent = float(state.get("budget_spent_usd", 0.0))
+    remaining = max(0.0, cfg.budget_max_usd - spent)
+
+    return template.format(
+        iteration=iteration,
+        mode=mode,
+        mode_instructions=mode_instructions(mode),
+        strategy_file=str(cfg.strategy_file),
+        target_holdout=cfg.target_holdout_avg,
+        train_fold_summary=folds_summary(cfg.train_folds),
+        holdout_fold_summary=folds_summary([cfg.holdout_fold]),
+        budget_remaining=remaining,
+        budget_spent=spent,
+        recent_history=recent_history_summary(state),
+        elite_summary=elite_summary(state),
+    )
+
+
+def evaluate_fold(cfg: Config, fold: FoldSpec) -> dict[str, Any]:
+    command = cfg.run_command_template.format(
+        strategy_file=shlex.quote(str(cfg.strategy_file)),
+        simulations=fold.simulations,
+        steps=fold.steps,
+        seed_start=fold.seed_start,
+        seed_stride=fold.seed_stride,
+        fold_name=fold.name,
+    )
+    result = run_command(
+        command,
+        cwd=cfg.workspace,
+        timeout_sec=cfg.eval_timeout_sec,
+        use_shell=True,
+    )
+
+    data: dict[str, Any] = {
+        "fold": fold.name,
+        "command": command,
+        "exit_code": result.exit_code,
+        "duration_sec": result.duration_sec,
+        "timed_out": result.timed_out,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+    if result.exit_code == 0:
+        try:
+            data["avg_edge"] = parse_metric(result.stdout, AVG_EDGE_RE, "avg edge")
+            data["total_edge"] = parse_metric(result.stdout, TOTAL_EDGE_RE, "total edge")
+        except HarnessError as exc:
+            data["parse_error"] = str(exc)
+    return data
+
+
+def validate_strategy(cfg: Config) -> dict[str, Any]:
+    command = cfg.validate_command_template.format(
+        strategy_file=shlex.quote(str(cfg.strategy_file)),
+    )
+    result = run_command(
+        command,
+        cwd=cfg.workspace,
+        timeout_sec=cfg.eval_timeout_sec,
+        use_shell=True,
+    )
+
+    return {
+        "command": command,
+        "exit_code": result.exit_code,
+        "duration_sec": result.duration_sec,
+        "timed_out": result.timed_out,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+    }
+
+
+def update_elites(
+    state: dict[str, Any],
+    *,
+    iteration: int,
+    candidate_file: Path,
+    strategy_hash: str,
+    train_avg: float,
+    train_worst: float,
+    cfg: Config,
+) -> None:
+    elites = state.setdefault("elites", [])
+    existing_hashes = {item["strategy_hash"] for item in elites}
+    if strategy_hash in existing_hashes:
+        return
+
+    elites.append(
+        {
+            "iteration": iteration,
+            "candidate_file": str(candidate_file),
+            "strategy_hash": strategy_hash,
+            "train_avg": train_avg,
+            "train_worst": train_worst,
+            "added_at": now_iso(),
+        }
+    )
+    elites.sort(key=lambda item: (item["train_avg"], item["train_worst"]), reverse=True)
+    del elites[cfg.elite_pool_size :]
+
+
+def print_iteration_header(iteration: int, mode: str, budget_spent: float, budget_max: float) -> None:
+    print(
+        f"\n=== Iteration {iteration} | mode={mode} | budget=${budget_spent:.2f}/${budget_max:.2f} ==="
+    )
+
+
+def run_harness(cfg: Config) -> int:
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    iterations_dir = cfg.state_dir / "iterations"
+    iterations_dir.mkdir(parents=True, exist_ok=True)
+
+    state_path = cfg.state_dir / "state.json"
+    state = load_state(state_path)
+
+    start_iter = len(state.get("iterations", []))
+
+    for iteration in range(start_iter, cfg.max_iterations):
+        spent = float(state.get("budget_spent_usd", 0.0))
+        if spent >= cfg.budget_max_usd:
+            state["stopped_reason"] = "budget_exhausted"
+            save_state(state_path, state)
+            print("Budget exhausted before next iteration.")
+            return 2
+
+        mode = choose_mode(state, cfg, iteration)
+        print_iteration_header(iteration, mode, spent, cfg.budget_max_usd)
+
+        iter_dir = iterations_dir / f"iter_{iteration:04d}"
+        iter_dir.mkdir(parents=True, exist_ok=True)
+
+        reset_source = maybe_reset_strategy(cfg, state, mode)
+        if reset_source is not None:
+            print(f"Restart mode: seeded strategy from {reset_source}")
+
+        prompt = render_prompt(cfg, state, iteration, mode)
+        prompt_path = iter_dir / "agent_prompt.md"
+        write_text(prompt_path, prompt)
+
+        agent_command = cfg.agent_command_template.format(
+            prompt_file=shlex.quote(str(prompt_path)),
+            strategy_file=shlex.quote(str(cfg.strategy_file)),
+            workspace=shlex.quote(str(cfg.workspace)),
+            iteration=iteration,
+            mode=mode,
+            state_dir=shlex.quote(str(cfg.state_dir)),
+        )
+
+        agent_result = run_command(
+            agent_command,
+            cwd=cfg.workspace,
+            timeout_sec=cfg.agent_timeout_sec,
+            use_shell=cfg.agent_use_shell,
+        )
+
+        write_text(iter_dir / "agent_stdout.log", agent_result.stdout)
+        write_text(iter_dir / "agent_stderr.log", agent_result.stderr)
+
+        combined_agent_output = agent_result.stdout + "\n" + agent_result.stderr
+        parsed_cost = parse_agent_cost(combined_agent_output, cfg.pricing)
+        iter_cost = (
+            parsed_cost
+            if parsed_cost is not None
+            else cfg.budget_fallback_per_iteration
+        )
+        state["budget_spent_usd"] = float(state.get("budget_spent_usd", 0.0)) + iter_cost
+
+        print(
+            f"Agent exit={agent_result.exit_code} timeout={agent_result.timed_out} "
+            f"dur={agent_result.duration_sec:.1f}s cost=${iter_cost:.2f}"
+        )
+
+        if not cfg.strategy_file.exists():
+            raise HarnessError(f"Strategy file missing after agent run: {cfg.strategy_file}")
+
+        candidate_file = iter_dir / "candidate.rs"
+        shutil.copy2(cfg.strategy_file, candidate_file)
+        strategy_hash = sha256_file(candidate_file)
+
+        validate_info = None
+        if cfg.validate_before_eval:
+            validate_info = validate_strategy(cfg)
+            write_text(iter_dir / "validate_stdout.log", validate_info["stdout"])
+            write_text(iter_dir / "validate_stderr.log", validate_info["stderr"])
+
+        train_results: list[dict[str, Any]] = []
+        holdout_result: dict[str, Any] | None = None
+
+        validation_ok = (
+            True
+            if validate_info is None
+            else int(validate_info.get("exit_code", 1)) == 0
+        )
+
+        train_avg: float | None = None
+        train_worst: float | None = None
+        promoted = False
+        holdout_avg: float | None = None
+        passed = False
+
+        if validation_ok:
+            for fold in cfg.train_folds:
+                fold_result = evaluate_fold(cfg, fold)
+                train_results.append(fold_result)
+                write_text(
+                    iter_dir / f"train_{fold.name}_stdout.log",
+                    fold_result.get("stdout", ""),
+                )
+                write_text(
+                    iter_dir / f"train_{fold.name}_stderr.log",
+                    fold_result.get("stderr", ""),
+                )
+
+                avg_edge = fold_result.get("avg_edge")
+                status = "ok" if isinstance(avg_edge, (int, float)) else "fail"
+                print(
+                    f"Train fold {fold.name}: status={status} "
+                    f"avg={avg_edge if avg_edge is not None else 'n/a'}"
+                )
+
+            fold_avgs = [
+                float(item["avg_edge"])
+                for item in train_results
+                if isinstance(item.get("avg_edge"), (int, float))
+            ]
+            if len(fold_avgs) == len(cfg.train_folds):
+                train_avg = statistics.mean(fold_avgs)
+                train_worst = min(fold_avgs)
+                promoted = (
+                    train_avg >= cfg.min_train_avg_for_holdout
+                    and train_worst >= cfg.min_train_worst_for_holdout
+                )
+                print(
+                    f"Train aggregate: avg={train_avg:.2f}, worst={train_worst:.2f}, promoted={promoted}"
+                )
+            else:
+                print("Skipping holdout promotion due to train fold failures.")
+
+            if promoted:
+                holdout_result = evaluate_fold(cfg, cfg.holdout_fold)
+                write_text(
+                    iter_dir / f"holdout_{cfg.holdout_fold.name}_stdout.log",
+                    holdout_result.get("stdout", ""),
+                )
+                write_text(
+                    iter_dir / f"holdout_{cfg.holdout_fold.name}_stderr.log",
+                    holdout_result.get("stderr", ""),
+                )
+
+                holdout_avg_val = holdout_result.get("avg_edge")
+                if isinstance(holdout_avg_val, (int, float)):
+                    holdout_avg = float(holdout_avg_val)
+                    passed = holdout_avg > cfg.target_holdout_avg
+                    print(
+                        f"Holdout avg={holdout_avg:.2f} target>{cfg.target_holdout_avg:.2f} passed={passed}"
+                    )
+                else:
+                    print("Holdout run failed to produce parsable avg edge.")
+        else:
+            print("Validation failed; skipping train/holdout eval this iteration.")
+
+        if isinstance(train_avg, (int, float)) and isinstance(train_worst, (int, float)):
+            update_elites(
+                state,
+                iteration=iteration,
+                candidate_file=candidate_file,
+                strategy_hash=strategy_hash,
+                train_avg=float(train_avg),
+                train_worst=float(train_worst),
+                cfg=cfg,
+            )
+            if train_avg > float(state.get("best_train_avg", float("-inf"))):
+                state["best_train_avg"] = float(train_avg)
+
+        if isinstance(holdout_avg, (int, float)):
+            if holdout_avg > float(state.get("best_holdout_avg", float("-inf"))):
+                state["best_holdout_avg"] = float(holdout_avg)
+                state["best_holdout_candidate"] = str(candidate_file)
+
+        iteration_record = {
+            "iteration": iteration,
+            "timestamp": now_iso(),
+            "mode": mode,
+            "reset_source": reset_source,
+            "strategy_hash": strategy_hash,
+            "candidate_file": str(candidate_file),
+            "agent": {
+                "command": agent_command,
+                "exit_code": agent_result.exit_code,
+                "timed_out": agent_result.timed_out,
+                "duration_sec": agent_result.duration_sec,
+                "cost_usd": iter_cost,
+                "cost_parsed": parsed_cost is not None,
+            },
+            "validation": validate_info,
+            "train_results": [
+                {
+                    k: v
+                    for k, v in item.items()
+                    if k
+                    in {
+                        "fold",
+                        "command",
+                        "exit_code",
+                        "duration_sec",
+                        "timed_out",
+                        "avg_edge",
+                        "total_edge",
+                        "parse_error",
+                    }
+                }
+                for item in train_results
+            ],
+            "train_avg": train_avg,
+            "train_worst": train_worst,
+            "promoted_to_holdout": promoted,
+            "holdout_result": (
+                {
+                    k: v
+                    for k, v in holdout_result.items()
+                    if k
+                    in {
+                        "fold",
+                        "command",
+                        "exit_code",
+                        "duration_sec",
+                        "timed_out",
+                        "avg_edge",
+                        "total_edge",
+                        "parse_error",
+                    }
+                }
+                if holdout_result is not None
+                else None
+            ),
+            "holdout_avg": holdout_avg,
+            "passed_target": passed,
+            "budget_spent_usd": state.get("budget_spent_usd"),
+        }
+
+        state.setdefault("iterations", []).append(iteration_record)
+        save_state(state_path, state)
+
+        if passed:
+            state["stopped_reason"] = "target_reached"
+            save_state(state_path, state)
+            print(
+                f"\nSUCCESS: holdout avg {holdout_avg:.2f} exceeded target {cfg.target_holdout_avg:.2f}."
+            )
+            return 0
+
+        if float(state.get("budget_spent_usd", 0.0)) >= cfg.budget_max_usd:
+            state["stopped_reason"] = "budget_exhausted"
+            save_state(state_path, state)
+            print("Budget exhausted; stopping.")
+            return 2
+
+    state["stopped_reason"] = "max_iterations_reached"
+    save_state(state_path, state)
+    print("Reached max iterations without hitting target.")
+    return 3
+
+
+def dry_run(cfg: Config) -> int:
+    print("Dry run summary")
+    print(f"workspace: {cfg.workspace}")
+    print(f"strategy_file: {cfg.strategy_file}")
+    print(f"state_dir: {cfg.state_dir}")
+    print(f"max_iterations: {cfg.max_iterations}")
+    print(f"target_holdout_avg: {cfg.target_holdout_avg}")
+    print(f"train folds: {len(cfg.train_folds)}")
+    print(f"holdout fold: {cfg.holdout_fold.name}")
+    print(f"agent command template: {cfg.agent_command_template}")
+
+    sample_state = {
+        "iterations": [],
+        "elites": [],
+        "budget_spent_usd": 0.0,
+    }
+    prompt = render_prompt(cfg, sample_state, 0, "exploit")
+    print("\n--- Prompt Preview ---")
+    print(prompt)
+    print("--- End Prompt Preview ---")
+    return 0
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Run a budget-constrained agent loop that keeps improving a Prop AMM strategy "
+            "until holdout target is reached."
+        )
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        help="Path to TOML config file",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Validate config and show first prompt without executing commands",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    cfg = load_config(args.config.resolve())
+
+    if args.dry_run:
+        return dry_run(cfg)
+
+    return run_harness(cfg)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

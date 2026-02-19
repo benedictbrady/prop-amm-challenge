@@ -1,0 +1,83 @@
+# Legacy Prop AMM-only config for `harness/agent_harness.py`.
+# Prefer `harness/configs/prop_amm.local.example.toml` with `harness/core/loop.py`.
+
+[paths]
+workspace = "."
+strategy_file = "programs/starter/src/lib.rs"
+# Optional restart anchor used by restart mode.
+baseline_strategy_file = "programs/starter/src/lib.rs"
+state_dir = ".harness"
+prompt_template = "harness/prompt_template.md"
+
+[loop]
+max_iterations = 200
+agent_timeout_sec = 1800
+eval_timeout_sec = 1800
+# Switch to diversify mode if no meaningful train gain over this window.
+stagnation_window = 8
+stagnation_min_delta = 2.0
+# Force exploration periodically even without stagnation.
+diversification_interval = 5
+# Force controlled restart periodically to escape local minima.
+restart_interval = 11
+# Keep this many elite candidates for restarts / references.
+elite_pool_size = 6
+
+[target]
+# Stop only when holdout avg edge is strictly greater than this value.
+holdout_avg_edge = 525.0
+# Promotion gate before running expensive 1000-sim holdout.
+min_train_avg_for_holdout = 505.0
+min_train_worst_for_holdout = 470.0
+
+[evaluation]
+validate_before_eval = true
+# Keep defaults unless you have a globally installed `prop-amm` binary.
+validate_command_template = "cargo run -q -p prop-amm -- validate {strategy_file}"
+run_command_template = "cargo run -q -p prop-amm -- run {strategy_file} --simulations {simulations} --steps {steps} --seed-start {seed_start} --seed-stride {seed_stride}"
+
+[agent]
+# Replace with your preferred framework command.
+# The harness injects placeholders: {prompt_file}, {strategy_file}, {workspace}, {iteration}, {mode}, {state_dir}
+command_template = "codex exec --non-interactive --prompt-file {prompt_file}"
+use_shell = true
+
+[budget]
+max_usd = 1000.0
+# Used when the agent output does not expose cost/tokens.
+fallback_per_iteration_usd = 5.0
+
+# Optional: enable exact-ish per-iteration cost from token usage if your
+# agent outputs token counts in logs. Otherwise fallback_per_iteration_usd is used.
+# [pricing]
+# input_per_million = 1.50
+# cached_input_per_million = 0.375
+# output_per_million = 6.00
+
+[[train_folds]]
+name = "train_a"
+simulations = 256
+steps = 10000
+seed_start = 0
+seed_stride = 1
+
+[[train_folds]]
+name = "train_b"
+simulations = 256
+steps = 10000
+seed_start = 200000
+seed_stride = 1
+
+[[train_folds]]
+name = "train_c"
+simulations = 256
+steps = 10000
+seed_start = 400000
+seed_stride = 1
+
+[holdout_fold]
+name = "holdout_1k"
+simulations = 1000
+steps = 10000
+seed_start = 900000
+seed_stride = 1

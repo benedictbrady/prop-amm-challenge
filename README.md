@@ -303,6 +303,35 @@ The engine parallelizes across simulations using up to 8 worker threads (configu
 | 1,000 sims / 10k steps   | ~5s            | Apple M3 Pro, native |
 | 1,000 sims / 10k steps   | ~15 min        | Apple M3 Pro, BPF |
 
+## Agentic Optimization Harness
+
+This repo includes a reusable, cloud-ready harness at `harness/`:
+
+- Generic loop engine (`harness/core/loop.py`)
+- Pluggable task adapters (`harness/tasks/*`)
+- Pluggable agent backends (`harness/agents/*`)
+- Cloud execution options (GitHub Actions + Docker)
+
+The bundled Prop AMM adapter enforces:
+
+- Multi-fold train evaluation on disjoint seed ranges
+- Separate 1,000-sim out-of-sample holdout gate
+- Budget cap and stopping conditions
+- Local-minima mitigation (diversification + controlled restarts)
+
+See `harness/README.md`, `harness/CLOUD.md`, and `harness/FRAMEWORK_RESEARCH.md`.
+
+## AWS Runner Automation
+
+This repo includes AWS + GitHub automation scripts under `infra/` for running the harness on a persistent EC2 server:
+
+- Create private repo + deploy key: `infra/github/*`
+- Provision EC2 + SSM + systemd harness service: `infra/aws/provision_ec2_runner.sh`
+- Add budget guardrail alerts: `infra/aws/create_budget_guardrail.sh`
+- Teardown resources: `infra/aws/teardown_runner.sh`
+
+See `infra/docs/AWS_GITHUB_SETUP.md` for the end-to-end flow.
+
 ## Submission
 
 Submit your `lib.rs` source code through the web UI. The server handles compilation, validation, and simulation — you don't need any toolchain beyond what's needed for local testing.

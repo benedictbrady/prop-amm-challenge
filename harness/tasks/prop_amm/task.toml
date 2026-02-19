@@ -1,0 +1,43 @@
+[target]
+holdout_avg_edge = 525.0
+min_train_avg_for_holdout = 505.0
+min_train_worst_for_holdout = 470.0
+
+[evaluation]
+validate_before_eval = true
+validate_timeout_sec = 1800
+run_timeout_sec = 1800
+validate_command_template = "cargo run -q -p prop-amm -- validate {strategy_file}"
+run_command_template = "cargo run -q -p prop-amm -- run {strategy_file} --simulations {simulations} --steps {steps} --seed-start {seed_start} --seed-stride {seed_stride}"
+
+[parsing]
+avg_edge_regex = 'Avg edge:\s*([-+]?\d+(?:\.\d+)?)'
+total_edge_regex = 'Total edge:\s*([-+]?\d+(?:\.\d+)?)'
+
+[[train_folds]]
+name = "train_a"
+simulations = 256
+steps = 10000
+seed_start = 0
+seed_stride = 1
+
+[[train_folds]]
+name = "train_b"
+simulations = 256
+steps = 10000
+seed_start = 200000
+seed_stride = 1
+
+[[train_folds]]
+name = "train_c"
+simulations = 256
+steps = 10000
+seed_start = 400000
+seed_stride = 1
+
+[holdout_fold]
+name = "holdout_1k"
+simulations = 1000
+steps = 10000
+seed_start = 900000
+seed_stride = 1
