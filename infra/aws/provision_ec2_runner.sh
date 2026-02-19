@@ -291,7 +291,12 @@ WantedBy=multi-user.target
 SERVICE
 
 systemctl daemon-reload
-systemctl enable --now prop-amm-harness.service
+if [[ -n "\$openai_key" && "\$openai_key" != "None" ]]; then
+  systemctl enable --now prop-amm-harness.service
+else
+  systemctl enable prop-amm-harness.service
+  echo "OPENAI_API_KEY missing; service enabled but not started. Set ${OPENAI_PARAM} in SSM and run: systemctl start prop-amm-harness.service" >> /var/log/prop-amm-harness.log
+fi
 EOF
 
 KEY_ARG=()
