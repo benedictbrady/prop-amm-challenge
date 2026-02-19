@@ -279,6 +279,10 @@ AGENT_MODEL=${AGENT_MODEL}
 SYSADMIN_MODEL=${SYSADMIN_MODEL}
 ENV
 chmod 600 /etc/prop-amm/harness.env
+
+if [[ -n "\$openai_key" && "\$openai_key" != "None" ]]; then
+  su - ec2-user -c "env OPENAI_API_KEY='\$openai_key' bash -lc 'printf \"%s\" \"\$OPENAI_API_KEY\" | codex login --with-api-key >/dev/null 2>/dev/null || true'"
+fi
 set -x
 
 cat > /etc/systemd/system/prop-amm-harness.service <<'SERVICE'

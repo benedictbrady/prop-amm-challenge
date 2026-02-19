@@ -118,3 +118,4 @@ Fallback (if you do not use OIDC): set repo secrets `AWS_ACCESS_KEY_ID`, `AWS_SE
 - Harness state persists in repo workspace under `.harness/`.
 - Update code by pushing to GitHub and pulling on the instance.
 - Resource names are prefixed by `--name-prefix` for easy cleanup.
+- Provision/update scripts perform non-interactive `codex login --with-api-key` on the runner when `OPENAI_API_KEY` is available.
