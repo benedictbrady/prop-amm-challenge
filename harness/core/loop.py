@@ -465,6 +465,11 @@ def maybe_reset_strategy(cfg: Config, state: dict[str, Any], mode: str) -> str |
     if source is None or not source.exists():
         return None
 
+    # Restart mode may point to the same file (e.g. baseline == strategy file).
+    # Skip reset in that case to avoid SameFileError.
+    if source.resolve() == cfg.strategy_file.resolve():
+        return None
+
     shutil.copy2(source, cfg.strategy_file)
     return str(source)
 
