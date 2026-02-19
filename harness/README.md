@@ -47,7 +47,7 @@ See `harness/CLOUD.md`.
 - Set `loop.max_iterations = 0` for unbounded iterations.
 - Set `loop.stop_on_target = false` to continue optimizing after target hits.
 - Enable `[sysadmin]` to run a periodic high-reasoning health check and auto-remediation actions.
-- Default cloud config uses `SYSADMIN_MODEL` (for example `gpt-5.3`) via `harness/agents/openai_sysadmin.py`.
+- Default cloud config runs sysadmin checks every 10 minutes using `SYSADMIN_MODEL` (default `gpt-5`) via `harness/agents/openai_sysadmin.py`.
 
 ## Why this is reusable
 

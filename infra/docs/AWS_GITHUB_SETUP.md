@@ -52,7 +52,7 @@ Private key will be written to `.secrets/danrobinson_prop-amm-agent-harness_depl
   --repo-ssh-url git@github.com:danrobinson/prop-amm-agent-harness.git \
   --deploy-key-file .secrets/danrobinson_prop-amm-agent-harness_deploy_key \
   --openai-api-key "$OPENAI_API_KEY" \
-  --sysadmin-model gpt-5.3 \
+  --sysadmin-model gpt-5 \
   --config-path harness/configs/prop_amm.cloud.toml
 ```
 

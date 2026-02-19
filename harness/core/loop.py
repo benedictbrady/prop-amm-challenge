@@ -156,7 +156,7 @@ class Config:
     task_command_template: str
     task_use_shell: bool
     sysadmin_enabled: bool
-    sysadmin_interval_iterations: int
+    sysadmin_interval_seconds: int
     sysadmin_failure_streak_trigger: int
     sysadmin_timeout_sec: int
     sysadmin_prompt_template_path: Path | None
@@ -290,8 +290,8 @@ def load_config(path: Path) -> Config:
         task_command_template=task_command_template,
         task_use_shell=bool(task.get("use_shell", True)),
         sysadmin_enabled=sysadmin_enabled,
-        sysadmin_interval_iterations=int(sysadmin.get("interval_iterations", 12)),
-        sysadmin_failure_streak_trigger=int(sysadmin.get("failure_streak_trigger", 4)),
+        sysadmin_interval_seconds=int(sysadmin.get("interval_seconds", 600)),
+        sysadmin_failure_streak_trigger=int(sysadmin.get("failure_streak_trigger", 0)),
         sysadmin_timeout_sec=int(sysadmin.get("timeout_sec", 300)),
         sysadmin_prompt_template_path=sysadmin_prompt_template_path,
         sysadmin_command_template=sysadmin_command_template,
@@ -318,10 +318,10 @@ def load_config(path: Path) -> Config:
         raise HarnessError("budget.fallback_per_iteration_usd must be >= 0")
     if cfg.budget_fallback_on_failure < 0:
         raise HarnessError("budget.fallback_on_failure_usd must be >= 0")
-    if cfg.sysadmin_interval_iterations < 1:
-        raise HarnessError("sysadmin.interval_iterations must be >= 1")
-    if cfg.sysadmin_failure_streak_trigger < 1:
-        raise HarnessError("sysadmin.failure_streak_trigger must be >= 1")
+    if cfg.sysadmin_interval_seconds < 1:
+        raise HarnessError("sysadmin.interval_seconds must be >= 1")
+    if cfg.sysadmin_failure_streak_trigger < 0:
+        raise HarnessError("sysadmin.failure_streak_trigger must be >= 0")
     if cfg.sysadmin_timeout_sec <= 0:
         raise HarnessError("sysadmin.timeout_sec must be > 0")
 
@@ -689,6 +689,18 @@ def parse_first_json_object(text: str) -> dict[str, Any] | None:
         return None
 
 
+def parse_iso_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
 def should_run_sysadmin(cfg: Config, state: dict[str, Any], iteration: int) -> tuple[bool, str]:
     if not cfg.sysadmin_enabled:
         return False, "disabled"
@@ -700,10 +712,17 @@ def should_run_sysadmin(cfg: Config, state: dict[str, Any], iteration: int) -> t
     if iteration == 0:
         return True, "startup"
 
-    if iteration % cfg.sysadmin_interval_iterations == 0:
+    last_ts = parse_iso_timestamp(state.get("sysadmin_last_timestamp"))
+    if last_ts is None:
+        return True, "first_check"
+    elapsed_sec = int((datetime.now(timezone.utc) - last_ts).total_seconds())
+    if elapsed_sec >= cfg.sysadmin_interval_seconds:
         return True, "interval"
 
-    if recent_agent_failure_streak(state) >= cfg.sysadmin_failure_streak_trigger:
+    if (
+        cfg.sysadmin_failure_streak_trigger > 0
+        and recent_agent_failure_streak(state) >= cfg.sysadmin_failure_streak_trigger
+    ):
         return True, "failure_streak"
 
     return False, "not_due"
@@ -719,10 +738,22 @@ def apply_sysadmin_action(cfg: Config, action: str) -> str:
         time.sleep(300)
         return "slept_300s"
     if action == "restart_from_baseline":
-        if cfg.baseline_strategy_file is None or not cfg.baseline_strategy_file.exists():
-            return "restart_from_baseline_skipped_missing_baseline"
-        shutil.copy2(cfg.baseline_strategy_file, cfg.strategy_file)
-        return "reseeded_from_baseline"
+        if (
+            cfg.baseline_strategy_file is not None
+            and cfg.baseline_strategy_file.exists()
+            and cfg.baseline_strategy_file.resolve() != cfg.strategy_file.resolve()
+        ):
+            shutil.copy2(cfg.baseline_strategy_file, cfg.strategy_file)
+            return "reseeded_from_baseline"
+        restore = run_command(
+            f"git checkout -- {shlex.quote(str(cfg.strategy_file))}",
+            cwd=cfg.workspace,
+            timeout_sec=60,
+            use_shell=True,
+        )
+        if restore.exit_code == 0:
+            return "reseeded_from_git_head"
+        return "restart_from_baseline_skipped_missing_baseline"
     return f"unknown_action:{action}"
 
 
@@ -1226,6 +1257,7 @@ def run_harness(cfg: Config) -> int:
             )
             state.pop("sysadmin_trigger_reason", None)
             state["sysadmin_last_iteration"] = iteration
+            state["sysadmin_last_timestamp"] = sysadmin_record.get("timestamp")
             state.setdefault("sysadmin_checks", []).append(sysadmin_record)
             state["iterations"][-1]["sysadmin"] = sysadmin_record
             save_state(state_path, state)
@@ -1292,6 +1324,8 @@ def dry_run(cfg: Config) -> int:
     print(f"sysadmin_enabled: {cfg.sysadmin_enabled}")
     if cfg.sysadmin_enabled:
         print(f"sysadmin_command_template: {cfg.sysadmin_command_template}")
+        print(f"sysadmin_interval_seconds: {cfg.sysadmin_interval_seconds}")
+        print(f"sysadmin_failure_streak_trigger: {cfg.sysadmin_failure_streak_trigger}")
 
     if context_result.exit_code != 0:
         print("\nTask context call failed.")

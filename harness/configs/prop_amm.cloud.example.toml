@@ -37,8 +37,8 @@ use_shell = true
 
 [sysadmin]
 enabled = true
-interval_iterations = 12
-failure_streak_trigger = 4
+interval_seconds = 600
+failure_streak_trigger = 0
 timeout_sec = 300
 prompt_template = "harness/templates/sysadmin_prompt.md"
 command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model $SYSADMIN_MODEL --reasoning-effort high"

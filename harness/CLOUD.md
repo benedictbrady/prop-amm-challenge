@@ -35,7 +35,7 @@ Run image:
 docker run --rm \
   -e OPENAI_API_KEY="$OPENAI_API_KEY" \
   -e AGENT_MODEL="gpt-5" \
-  -e SYSADMIN_MODEL="gpt-5.3" \
+  -e SYSADMIN_MODEL="gpt-5" \
   -e HARNESS_CONFIG="harness/configs/prop_amm.cloud.toml" \
   -e HARNESS_WORKDIR="/workspace" \
   -v "$PWD":/workspace \

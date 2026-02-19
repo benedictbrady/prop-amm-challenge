@@ -39,6 +39,27 @@ def extract_output_text(resp: Any) -> str:
                         parts.append(ctext)
                     elif isinstance(c, dict) and isinstance(c.get("text"), str):
                         parts.append(c["text"])
+    if parts:
+        return "\n".join(parts)
+
+    dump_fn = getattr(resp, "model_dump", None)
+    if callable(dump_fn):
+        dumped = dump_fn()
+        if isinstance(dumped, dict):
+            queue: list[Any] = [dumped]
+            while queue:
+                item = queue.pop(0)
+                if isinstance(item, dict):
+                    text_val = item.get("text")
+                    if isinstance(text_val, str) and text_val.strip():
+                        parts.append(text_val)
+                    value_val = item.get("value")
+                    if isinstance(value_val, str) and value_val.strip():
+                        parts.append(value_val)
+                    queue.extend(item.values())
+                elif isinstance(item, list):
+                    queue.extend(item)
+
     return "\n".join(parts)
 
 
@@ -66,7 +87,8 @@ def parse_json_obj(text: str) -> dict[str, Any] | None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OpenAI sysadmin checker")
     parser.add_argument("--prompt-file", required=True, type=Path)
-    parser.add_argument("--model", default="gpt-5.3")
+    parser.add_argument("--model", default="gpt-5")
+    parser.add_argument("--fallback-model", default="gpt-5")
     parser.add_argument("--reasoning-effort", default="high")
     parser.add_argument("--max-output-tokens", type=int, default=1200)
     return parser.parse_args(argv)
@@ -82,20 +104,46 @@ def main(argv: list[str]) -> int:
 
     prompt = read_text(args.prompt_file)
     client = OpenAI()
-    resp = client.responses.create(
-        model=args.model,
-        reasoning={"effort": args.reasoning_effort},
-        max_output_tokens=args.max_output_tokens,
-        input=[
-            {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
-            {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
-        ],
-    )
+    models = [args.model]
+    if args.fallback_model and args.fallback_model not in models:
+        models.append(args.fallback_model)
 
-    text = extract_output_text(resp)
-    data = parse_json_obj(text)
+    data: dict[str, Any] | None = None
+    last_error = ""
+    for model in models:
+        try:
+            resp = client.responses.create(
+                model=model,
+                reasoning={"effort": args.reasoning_effort},
+                max_output_tokens=args.max_output_tokens,
+                input=[
+                    {"role": "system", "content": [{"type": "input_text", "text": SYSTEM_PROMPT}]},
+                    {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+                ],
+            )
+            text = extract_output_text(resp)
+            data = parse_json_obj(text)
+            if data is not None:
+                break
+            last_error = f"model {model} returned non-JSON output"
+        except Exception as exc:  # pragma: no cover - network/runtime errors
+            last_error = f"{type(exc).__name__}: {exc}"
+            continue
+
     if data is None:
-        raise SystemExit("Sysadmin model did not return valid JSON object")
+        print(
+            json.dumps(
+                {
+                    "decision": "continue",
+                    "health": "broken",
+                    "root_cause": f"sysadmin_model_failure: {last_error}",
+                    "action": "sleep_60",
+                    "notes": "fallback decision due to sysadmin model failure",
+                },
+                separators=(",", ":"),
+            )
+        )
+        return 0
 
     action = str(data.get("action", "noop")).strip().lower()
     if action not in ALLOWED_ACTIONS:
@@ -114,4 +162,3 @@ def main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1:]))
-
