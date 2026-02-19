@@ -39,7 +39,7 @@ run_command_template = "cargo run -q -p prop-amm -- run {strategy_file} --simula
 [agent]
 # Replace with your preferred framework command.
 # The harness injects placeholders: {prompt_file}, {strategy_file}, {workspace}, {iteration}, {mode}, {state_dir}
-command_template = "codex exec --non-interactive --prompt-file {prompt_file}"
+command_template = "codex exec --json -C {workspace} --dangerously-bypass-approvals-and-sandbox - < {prompt_file}"
 use_shell = true
 
 [budget]

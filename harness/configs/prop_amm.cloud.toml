@@ -28,8 +28,17 @@ cached_input_per_million = 0.125
 output_per_million = 10.0
 
 [agent]
-command_template = "python3 harness/agents/openai_ops_agent.py --prompt-file {prompt_file} --strategy-file {strategy_file} --workspace {workspace} --model $AGENT_MODEL --fallback-model $AGENT_MODEL --reasoning-effort high --max-output-tokens 2400 --max-steps 10 --command-timeout-sec 240 --input-per-million 1.25 --cached-input-per-million 0.125 --output-per-million 10.0"
+backend = "codex_cli"
 use_shell = true
+
+[agent.backend_options]
+model_expr = "${AGENT_MODEL:-gpt-5-codex}"
+fallback_model_expr = "${AGENT_FALLBACK_MODEL:-gpt-5-codex}"
+reasoning_effort = "high"
+sandbox = "danger-full-access"
+dangerously_bypass_approvals_and_sandbox = true
+skip_git_repo_check = false
+max_event_text_chars = 12000
 
 [task]
 command_template = "python3 harness/tasks/prop_amm/adapter.py --config harness/tasks/prop_amm/task.toml --action {action} --workspace {workspace} --strategy-file {strategy_file} --mode {mode} --iteration {iteration} --log-dir {iter_dir}/task"
@@ -41,5 +50,5 @@ interval_seconds = 600
 failure_streak_trigger = 0
 timeout_sec = 300
 prompt_template = "harness/templates/sysadmin_prompt.md"
-command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model $SYSADMIN_MODEL --fallback-model $SYSADMIN_MODEL --reasoning-effort high"
+command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model ${SYSADMIN_MODEL:-gpt-5-codex} --fallback-model ${SYSADMIN_MODEL:-gpt-5-codex} --reasoning-effort high"
 use_shell = true

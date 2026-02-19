@@ -15,8 +15,8 @@ Options:
   --repo-dir <path>            Repo dir on instance (default: /opt/prop-amm/repo)
   --remote <name>              Git remote (default: origin)
   --openai-param <name>        SSM parameter name for OpenAI API key (default: /prop-amm-harness/OPENAI_API_KEY)
-  --agent-model <model>        AGENT_MODEL written to env file (default: gpt-5)
-  --sysadmin-model <model>     SYSADMIN_MODEL written to env file (default: gpt-5)
+  --agent-model <model>        AGENT_MODEL written to env file (default: gpt-5-codex)
+  --sysadmin-model <model>     SYSADMIN_MODEL written to env file (default: gpt-5-codex)
   --no-restart                 Do not restart prop-amm-harness.service
   --wait-timeout <sec>         Wait timeout for command completion (default: 900)
   -h, --help                   Show help
@@ -33,8 +33,8 @@ BRANCH="codex/aws-ec2-harness"
 REPO_DIR="/opt/prop-amm/repo"
 REMOTE_NAME="origin"
 OPENAI_PARAM="${OPENAI_PARAM:-/prop-amm-harness/OPENAI_API_KEY}"
-AGENT_MODEL_VALUE="${AGENT_MODEL:-gpt-5}"
-SYSADMIN_MODEL_VALUE="${SYSADMIN_MODEL:-gpt-5}"
+AGENT_MODEL_VALUE="${AGENT_MODEL:-gpt-5-codex}"
+SYSADMIN_MODEL_VALUE="${SYSADMIN_MODEL:-gpt-5-codex}"
 RESTART_SERVICE="true"
 WAIT_TIMEOUT="900"
 
@@ -83,6 +83,10 @@ set -euxo pipefail
 
 if ! command -v cc >/dev/null 2>&1; then
   dnf install -y gcc gcc-c++ make
+fi
+if ! command -v codex >/dev/null 2>&1; then
+  dnf install -y nodejs npm
+  npm install -g @openai/codex@latest
 fi
 
 sudo -u ec2-user bash -lc '

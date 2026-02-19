@@ -14,9 +14,14 @@ on:
         default: false
         type: boolean
       agent_model:
-        description: "Model for OpenAI file editor backend"
+        description: "Model for core agent backend"
         required: false
-        default: "gpt-5"
+        default: "gpt-5-codex"
+        type: string
+      sysadmin_model:
+        description: "Model for sysadmin backend"
+        required: false
+        default: "gpt-5-codex"
         type: string
 
 concurrency:
@@ -42,6 +47,14 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex@latest
+
       - name: Install Python dependencies
         run: pip install -r harness/requirements.txt
 
@@ -66,6 +79,7 @@ jobs:
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           AGENT_MODEL: ${{ github.event.inputs.agent_model }}
+          SYSADMIN_MODEL: ${{ github.event.inputs.sysadmin_model }}
           CONFIG_PATH: ${{ github.event.inputs.config_path }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |

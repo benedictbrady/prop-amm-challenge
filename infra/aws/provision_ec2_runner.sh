@@ -28,8 +28,8 @@ Options:
   --key-name <name>                  Existing EC2 key pair name for SSH (optional)
   --deploy-key-file <path>           Private SSH deploy key file to store in SSM (optional)
   --openai-api-key <key>             OpenAI API key to store in SSM (optional)
-  --agent-model <model>              AGENT_MODEL env (default: gpt-5)
-  --sysadmin-model <model>           SYSADMIN_MODEL env (default: gpt-5)
+  --agent-model <model>              AGENT_MODEL env (default: gpt-5-codex)
+  --sysadmin-model <model>           SYSADMIN_MODEL env (default: gpt-5-codex)
   --print-only                       Print resolved plan only, do not create resources
   -h, --help                         Show this help
 EOF
@@ -52,8 +52,8 @@ SSH_CIDR=""
 KEY_NAME=""
 DEPLOY_KEY_FILE=""
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
-AGENT_MODEL="${AGENT_MODEL:-gpt-5}"
-SYSADMIN_MODEL="${SYSADMIN_MODEL:-gpt-5}"
+AGENT_MODEL="${AGENT_MODEL:-gpt-5-codex}"
+SYSADMIN_MODEL="${SYSADMIN_MODEL:-gpt-5-codex}"
 PRINT_ONLY="false"
 
 while [[ $# -gt 0 ]]; do
@@ -238,7 +238,10 @@ cat > "$USER_DATA_FILE" <<EOF
 set -euxo pipefail
 
 dnf update -y
-dnf install -y git jq curl python3 python3-pip awscli gcc gcc-c++ make
+dnf install -y git jq curl python3 python3-pip awscli gcc gcc-c++ make nodejs npm
+if ! command -v codex >/dev/null 2>&1; then
+  npm install -g @openai/codex@latest
+fi
 
 install -d -m 700 /home/ec2-user/.ssh
 chown -R ec2-user:ec2-user /home/ec2-user/.ssh

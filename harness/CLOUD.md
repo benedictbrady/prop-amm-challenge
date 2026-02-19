@@ -13,6 +13,7 @@ Setup:
 3. Optionally override:
    - `config_path`
    - `agent_model`
+   - `sysadmin_model`
    - `dry_run`
 
 Outputs:
@@ -34,8 +35,8 @@ Run image:
 ```bash
 docker run --rm \
   -e OPENAI_API_KEY="$OPENAI_API_KEY" \
-  -e AGENT_MODEL="gpt-5" \
-  -e SYSADMIN_MODEL="gpt-5" \
+  -e AGENT_MODEL="gpt-5-codex" \
+  -e SYSADMIN_MODEL="gpt-5-codex" \
   -e HARNESS_CONFIG="harness/configs/prop_amm.cloud.toml" \
   -e HARNESS_WORKDIR="/workspace" \
   -v "$PWD":/workspace \
@@ -44,9 +45,14 @@ docker run --rm \
 
 ## Using a different agent runtime
 
-Default cloud config uses `harness/agents/openai_ops_agent.py`, which can run shell commands and edit broadly in the workspace.
+Default cloud config uses `agent.backend = "codex_cli"` (implemented by `harness/agents/codex_cli_agent.py`), which wraps `codex exec` for non-interactive autonomous runs.
 
-If you prefer Codex CLI, Claude Code, OpenHands, etc., only change `agent.command_template` in config. The loop and task adapter stay unchanged.
+If you prefer a different runtime (OpenAI Responses, Claude Code, OpenHands, etc.), change only the `[agent]` section:
+
+- switch `agent.backend` (`codex_cli`, `openai_ops`, `openai_file_editor`), or
+- set `agent.command_template` for a custom command.
+
+The loop and task adapter stay unchanged.
 
 The optional sysadmin guard uses `sysadmin.command_template` and `SYSADMIN_MODEL`.
 

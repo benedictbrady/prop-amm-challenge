@@ -22,9 +22,17 @@ fallback_per_iteration_usd = 5.0
 fallback_on_failure_usd = 0.0
 
 [agent]
-# Replace with your local coding agent runtime command.
-command_template = "codex exec --non-interactive --prompt-file {prompt_file}"
+# Use backend registry (preferred). Alternative: set `command_template = "..."`
+backend = "codex_cli"
 use_shell = true
+
+[agent.backend_options]
+model_expr = "${AGENT_MODEL:-gpt-5-codex}"
+fallback_model_expr = "${AGENT_FALLBACK_MODEL:-gpt-5-codex}"
+reasoning_effort = "high"
+sandbox = "danger-full-access"
+dangerously_bypass_approvals_and_sandbox = true
+skip_git_repo_check = false
 
 [task]
 command_template = "python3 harness/tasks/prop_amm/adapter.py --config harness/tasks/prop_amm/task.toml --action {action} --workspace {workspace} --strategy-file {strategy_file} --mode {mode} --iteration {iteration} --log-dir {iter_dir}/task"
@@ -43,5 +51,5 @@ use_shell = true
 # failure_streak_trigger = 0
 # timeout_sec = 300
 # prompt_template = "harness/templates/sysadmin_prompt.md"
-# command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model $SYSADMIN_MODEL --reasoning-effort high"
+# command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model ${SYSADMIN_MODEL:-gpt-5-codex} --fallback-model ${SYSADMIN_MODEL:-gpt-5-codex} --reasoning-effort high"
 # use_shell = true

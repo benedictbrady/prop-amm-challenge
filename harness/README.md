@@ -12,7 +12,8 @@ The core loop (`harness/core/loop.py`) is problem-agnostic.
 - `harness/core/loop.py`: generic iteration engine, budget management, anti-local-minima policy, state persistence
 - `harness/tasks/prop_amm/adapter.py`: Prop AMM-specific evaluator
 - `harness/tasks/prop_amm/task.toml`: Prop AMM scoring config (folds, thresholds, parse regex)
-- `harness/agents/openai_ops_agent.py`: default cloud ops-capable agent backend
+- `harness/agents/codex_cli_agent.py`: default cloud backend (wraps `codex exec`)
+- `harness/agents/openai_ops_agent.py`: OpenAI Responses ops-capable backend
 - `harness/agents/openai_file_editor.py`: minimal one-file editor backend
 - `harness/configs/prop_amm.local.example.toml`: local config template
 - `harness/configs/prop_amm.cloud.example.toml`: cloud config template
@@ -48,16 +49,34 @@ See `harness/CLOUD.md`.
 - Set `loop.max_iterations = 0` for unbounded iterations.
 - Set `loop.stop_on_target = false` to continue optimizing after target hits.
 - Enable `[sysadmin]` to run a periodic high-reasoning health check and auto-remediation actions.
-- Default cloud config runs sysadmin checks every 10 minutes using `SYSADMIN_MODEL` (default `gpt-5`) via `harness/agents/openai_sysadmin.py`.
+- Default cloud config runs sysadmin checks every 10 minutes using `SYSADMIN_MODEL` (default `gpt-5-codex`) via `harness/agents/openai_sysadmin.py`.
 
 ## Why this is reusable
 
 To support a new problem, keep the same loop and either:
 
 1. Replace only `task.command_template` with a new adapter.
-2. Optionally replace `agent.command_template` with a different agent runtime.
+2. Swap `agent.backend` (or override `agent.command_template`) to use a different core agent runtime.
 
 No loop code changes are required if the adapter follows `harness/ADAPTER_INTERFACE.md`.
+
+## Agent backend abstraction
+
+Preferred config path:
+
+```toml
+[agent]
+backend = "codex_cli" # or openai_ops, openai_file_editor
+use_shell = true
+
+[agent.backend_options]
+model_expr = "${AGENT_MODEL:-gpt-5-codex}"
+```
+
+Backward compatibility:
+
+- `agent.command_template` still works and takes precedence.
+- This keeps existing setups stable while letting you switch core agents with minimal config edits.
 
 ## New Problem Bootstrap
 

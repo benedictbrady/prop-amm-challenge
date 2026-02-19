@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from harness.core.agent_backends import AgentBackendError, resolve_agent_backend
+except ModuleNotFoundError:  # pragma: no cover - script execution path fallback
+    from agent_backends import AgentBackendError, resolve_agent_backend  # type: ignore
+
+try:
     import tomllib  # type: ignore[attr-defined]
 except ModuleNotFoundError:  # pragma: no cover
     try:
@@ -151,6 +156,7 @@ class Config:
     budget_fallback_per_iteration: float
     budget_fallback_on_failure: float
     pricing: PricingSpec | None
+    agent_backend: str
     agent_command_template: str
     agent_use_shell: bool
     task_command_template: str
@@ -238,9 +244,25 @@ def load_config(path: Path) -> Config:
         else None
     )
 
-    agent_command_template = str(agent.get("command_template", "")).strip()
-    if not agent_command_template:
-        raise HarnessError("agent.command_template is required")
+    pricing = None
+    pricing_map: dict[str, float] | None = None
+    if "pricing" in raw:
+        p = raw["pricing"]
+        pricing = PricingSpec(
+            input_per_million=float(p["input_per_million"]),
+            cached_input_per_million=float(p["cached_input_per_million"]),
+            output_per_million=float(p["output_per_million"]),
+        )
+        pricing_map = {
+            "input_per_million": pricing.input_per_million,
+            "cached_input_per_million": pricing.cached_input_per_million,
+            "output_per_million": pricing.output_per_million,
+        }
+
+    try:
+        resolved_agent_backend = resolve_agent_backend(agent, pricing=pricing_map)
+    except AgentBackendError as exc:
+        raise HarnessError(str(exc)) from exc
 
     task_command_template = str(task.get("command_template", "")).strip()
     if not task_command_template:
@@ -250,21 +272,13 @@ def load_config(path: Path) -> Config:
     default_sysadmin_command = (
         "python3 harness/agents/openai_sysadmin.py "
         "--prompt-file {prompt_file} "
-        "--model $SYSADMIN_MODEL "
-        "--reasoning-effort high"
+        "--model ${SYSADMIN_MODEL:-gpt-5-codex} "
+        "--fallback-model ${SYSADMIN_MODEL:-gpt-5-codex} "
+        "--reasoning-effort high "
     )
     sysadmin_command_template = str(
         sysadmin.get("command_template", default_sysadmin_command)
     ).strip()
-
-    pricing = None
-    if "pricing" in raw:
-        p = raw["pricing"]
-        pricing = PricingSpec(
-            input_per_million=float(p["input_per_million"]),
-            cached_input_per_million=float(p["cached_input_per_million"]),
-            output_per_million=float(p["output_per_million"]),
-        )
 
     cfg = Config(
         workspace=workspace,
@@ -285,8 +299,9 @@ def load_config(path: Path) -> Config:
         budget_fallback_per_iteration=float(budget.get("fallback_per_iteration_usd", 5.0)),
         budget_fallback_on_failure=float(budget.get("fallback_on_failure_usd", 0.0)),
         pricing=pricing,
-        agent_command_template=agent_command_template,
-        agent_use_shell=bool(agent.get("use_shell", True)),
+        agent_backend=resolved_agent_backend.name,
+        agent_command_template=resolved_agent_backend.command_template,
+        agent_use_shell=resolved_agent_backend.use_shell,
         task_command_template=task_command_template,
         task_use_shell=bool(task.get("use_shell", True)),
         sysadmin_enabled=sysadmin_enabled,
@@ -1230,6 +1245,7 @@ def run_harness(cfg: Config) -> int:
             "strategy_hash": strategy_hash,
             "candidate_file": str(candidate_file),
             "agent": {
+                "backend": cfg.agent_backend,
                 "command": agent_command,
                 "exit_code": agent_result.exit_code,
                 "timed_out": agent_result.timed_out,
@@ -1329,6 +1345,7 @@ def dry_run(cfg: Config) -> int:
     print(f"state_dir: {cfg.state_dir}")
     print(f"max_iterations: {cfg.max_iterations}")
     print(f"stop_on_target: {cfg.stop_on_target}")
+    print(f"agent_backend: {cfg.agent_backend}")
     print(f"agent_command_template: {cfg.agent_command_template}")
     print(f"task_command_template: {cfg.task_command_template}")
     print(f"sysadmin_enabled: {cfg.sysadmin_enabled}")
