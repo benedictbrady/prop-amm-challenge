@@ -694,6 +694,12 @@ def run_harness(cfg: Config) -> int:
 
     state_path = cfg.state_dir / "state.json"
     state = load_state(state_path)
+    if (
+        state.get("stopped_reason") == "budget_exhausted"
+        and float(state.get("budget_spent_usd", 0.0)) < cfg.budget_max_usd
+    ):
+        state["stopped_reason"] = None
+        save_state(state_path, state)
     if migrate_cost_accounting(state, cfg):
         save_state(state_path, state)
 
