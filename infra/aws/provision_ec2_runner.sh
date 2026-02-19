@@ -29,6 +29,7 @@ Options:
   --deploy-key-file <path>           Private SSH deploy key file to store in SSM (optional)
   --openai-api-key <key>             OpenAI API key to store in SSM (optional)
   --agent-model <model>              AGENT_MODEL env (default: gpt-5)
+  --sysadmin-model <model>           SYSADMIN_MODEL env (default: gpt-5.3)
   --print-only                       Print resolved plan only, do not create resources
   -h, --help                         Show this help
 EOF
@@ -52,6 +53,7 @@ KEY_NAME=""
 DEPLOY_KEY_FILE=""
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
 AGENT_MODEL="${AGENT_MODEL:-gpt-5}"
+SYSADMIN_MODEL="${SYSADMIN_MODEL:-gpt-5.3}"
 PRINT_ONLY="false"
 
 while [[ $# -gt 0 ]]; do
@@ -84,6 +86,8 @@ while [[ $# -gt 0 ]]; do
       OPENAI_API_KEY="$2"; shift 2 ;;
     --agent-model)
       AGENT_MODEL="$2"; shift 2 ;;
+    --sysadmin-model)
+      SYSADMIN_MODEL="$2"; shift 2 ;;
     --print-only)
       PRINT_ONLY="true"; shift ;;
     -h|--help)
@@ -268,6 +272,7 @@ openai_key="\$(aws ssm get-parameter --region '${REGION}' --name '${OPENAI_PARAM
 cat > /etc/prop-amm/harness.env <<ENV
 OPENAI_API_KEY=\$openai_key
 AGENT_MODEL=${AGENT_MODEL}
+SYSADMIN_MODEL=${SYSADMIN_MODEL}
 ENV
 chmod 600 /etc/prop-amm/harness.env
 set -x

@@ -35,6 +35,7 @@ Run image:
 docker run --rm \
   -e OPENAI_API_KEY="$OPENAI_API_KEY" \
   -e AGENT_MODEL="gpt-5" \
+  -e SYSADMIN_MODEL="gpt-5.3" \
   -e HARNESS_CONFIG="harness/configs/prop_amm.cloud.toml" \
   -e HARNESS_WORKDIR="/workspace" \
   -v "$PWD":/workspace \
@@ -44,6 +45,8 @@ docker run --rm \
 ## Using a different agent runtime
 
 If you prefer Codex CLI, Claude Code, OpenHands, etc., only change `agent.command_template` in config. The loop and task adapter stay unchanged.
+
+The optional sysadmin guard uses `sysadmin.command_template` and `SYSADMIN_MODEL`.
 
 ## Option 3: Persistent AWS EC2 Runner
 

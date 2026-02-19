@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import re
 import shlex
@@ -13,6 +14,7 @@ import statistics
 import subprocess
 import sys
 import textwrap
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -84,6 +86,43 @@ DEFAULT_PROMPT_TEMPLATE = textwrap.dedent(
     """
 )
 
+DEFAULT_SYSADMIN_PROMPT_TEMPLATE = textwrap.dedent(
+    """\
+    You are the on-call sysadmin for an autonomous coding harness.
+    Your job is to keep it running continuously and recover from failures.
+    Never recommend stopping permanently.
+
+    Context:
+    - Iteration: {iteration}
+    - Target: {target_label}
+    - Failure streak (agent): {failure_streak}
+    - Latest iteration dir: {iter_dir}
+    - State file: {state_path}
+    - Strategy file: {strategy_file}
+
+    Recent history:
+    {recent_history}
+
+    Latest failures:
+    {recent_failures}
+
+    Allowed remediation actions:
+    - noop
+    - sleep_60
+    - sleep_300
+    - restart_from_baseline
+
+    Return ONLY JSON with this schema:
+    {{
+      "decision": "continue",
+      "health": "healthy|degraded|broken",
+      "root_cause": "short diagnosis",
+      "action": "noop|sleep_60|sleep_300|restart_from_baseline",
+      "notes": "short operator notes"
+    }}
+    """
+)
+
 
 @dataclass
 class PricingSpec:
@@ -100,6 +139,7 @@ class Config:
     state_dir: Path
     prompt_template_path: Path | None
     max_iterations: int
+    stop_on_target: bool
     agent_timeout_sec: int
     task_timeout_sec: int
     stagnation_window: int
@@ -115,6 +155,13 @@ class Config:
     agent_use_shell: bool
     task_command_template: str
     task_use_shell: bool
+    sysadmin_enabled: bool
+    sysadmin_interval_iterations: int
+    sysadmin_failure_streak_trigger: int
+    sysadmin_timeout_sec: int
+    sysadmin_prompt_template_path: Path | None
+    sysadmin_command_template: str
+    sysadmin_use_shell: bool
 
 
 @dataclass
@@ -160,6 +207,7 @@ def load_config(path: Path) -> Config:
     budget = raw.get("budget", {})
     agent = raw.get("agent", {})
     task = raw.get("task", {})
+    sysadmin = raw.get("sysadmin", {})
 
     workspace = Path(paths.get("workspace", ".")).expanduser().resolve()
 
@@ -183,6 +231,13 @@ def load_config(path: Path) -> Config:
         else None
     )
 
+    sysadmin_prompt_template_raw = sysadmin.get("prompt_template")
+    sysadmin_prompt_template_path = (
+        (workspace / str(sysadmin_prompt_template_raw)).resolve()
+        if sysadmin_prompt_template_raw is not None
+        else None
+    )
+
     agent_command_template = str(agent.get("command_template", "")).strip()
     if not agent_command_template:
         raise HarnessError("agent.command_template is required")
@@ -190,6 +245,17 @@ def load_config(path: Path) -> Config:
     task_command_template = str(task.get("command_template", "")).strip()
     if not task_command_template:
         raise HarnessError("task.command_template is required")
+
+    sysadmin_enabled = bool(sysadmin.get("enabled", False))
+    default_sysadmin_command = (
+        "python3 harness/agents/openai_sysadmin.py "
+        "--prompt-file {prompt_file} "
+        "--model $SYSADMIN_MODEL "
+        "--reasoning-effort high"
+    )
+    sysadmin_command_template = str(
+        sysadmin.get("command_template", default_sysadmin_command)
+    ).strip()
 
     pricing = None
     if "pricing" in raw:
@@ -207,6 +273,7 @@ def load_config(path: Path) -> Config:
         state_dir=state_dir,
         prompt_template_path=prompt_template_path,
         max_iterations=int(loop.get("max_iterations", 200)),
+        stop_on_target=bool(loop.get("stop_on_target", True)),
         agent_timeout_sec=int(loop.get("agent_timeout_sec", 1800)),
         task_timeout_sec=int(loop.get("task_timeout_sec", 1800)),
         stagnation_window=int(loop.get("stagnation_window", 8)),
@@ -222,10 +289,17 @@ def load_config(path: Path) -> Config:
         agent_use_shell=bool(agent.get("use_shell", True)),
         task_command_template=task_command_template,
         task_use_shell=bool(task.get("use_shell", True)),
+        sysadmin_enabled=sysadmin_enabled,
+        sysadmin_interval_iterations=int(sysadmin.get("interval_iterations", 12)),
+        sysadmin_failure_streak_trigger=int(sysadmin.get("failure_streak_trigger", 4)),
+        sysadmin_timeout_sec=int(sysadmin.get("timeout_sec", 300)),
+        sysadmin_prompt_template_path=sysadmin_prompt_template_path,
+        sysadmin_command_template=sysadmin_command_template,
+        sysadmin_use_shell=bool(sysadmin.get("use_shell", True)),
     )
 
-    if cfg.max_iterations <= 0:
-        raise HarnessError("loop.max_iterations must be > 0")
+    if cfg.max_iterations < 0:
+        raise HarnessError("loop.max_iterations must be >= 0 (0 means unbounded)")
     if cfg.agent_timeout_sec <= 0:
         raise HarnessError("loop.agent_timeout_sec must be > 0")
     if cfg.task_timeout_sec <= 0:
@@ -244,6 +318,12 @@ def load_config(path: Path) -> Config:
         raise HarnessError("budget.fallback_per_iteration_usd must be >= 0")
     if cfg.budget_fallback_on_failure < 0:
         raise HarnessError("budget.fallback_on_failure_usd must be >= 0")
+    if cfg.sysadmin_interval_iterations < 1:
+        raise HarnessError("sysadmin.interval_iterations must be >= 1")
+    if cfg.sysadmin_failure_streak_trigger < 1:
+        raise HarnessError("sysadmin.failure_streak_trigger must be >= 1")
+    if cfg.sysadmin_timeout_sec <= 0:
+        raise HarnessError("sysadmin.timeout_sec must be > 0")
 
     if not cfg.workspace.exists():
         raise HarnessError(f"workspace does not exist: {cfg.workspace}")
@@ -255,6 +335,15 @@ def load_config(path: Path) -> Config:
         )
     if cfg.prompt_template_path is not None and not cfg.prompt_template_path.exists():
         raise HarnessError(f"prompt template does not exist: {cfg.prompt_template_path}")
+    if (
+        cfg.sysadmin_prompt_template_path is not None
+        and not cfg.sysadmin_prompt_template_path.exists()
+    ):
+        raise HarnessError(
+            f"sysadmin prompt template does not exist: {cfg.sysadmin_prompt_template_path}"
+        )
+    if cfg.sysadmin_enabled and not cfg.sysadmin_command_template:
+        raise HarnessError("sysadmin.command_template is required when sysadmin.enabled=true")
 
     return cfg
 
@@ -268,6 +357,7 @@ def load_state(state_path: Path) -> dict[str, Any]:
             "budget_spent_usd": 0.0,
             "cost_policy_version": 2,
             "iterations": [],
+            "sysadmin_checks": [],
             "elites": [],
             "best_train_avg": float("-inf"),
             "best_holdout_avg": float("-inf"),
@@ -503,6 +593,222 @@ def elite_summary(state: dict[str, Any], count: int = 5) -> str:
     return "\n".join(lines)
 
 
+def recent_agent_failure_streak(state: dict[str, Any]) -> int:
+    streak = 0
+    for item in reversed(state.get("iterations", [])):
+        agent = item.get("agent", {})
+        if not isinstance(agent, dict):
+            break
+        exit_code = safe_int(agent.get("exit_code"))
+        timed_out = bool(agent.get("timed_out", False))
+        if exit_code == 0 and not timed_out:
+            break
+        streak += 1
+    return streak
+
+
+def recent_failure_summary(state: dict[str, Any], count: int = 5) -> str:
+    rows: list[str] = []
+    for item in reversed(state.get("iterations", [])):
+        if len(rows) >= count:
+            break
+        agent = item.get("agent", {})
+        task = item.get("task", {})
+        eval_result = task.get("result", {}) if isinstance(task, dict) else {}
+        agent_exit = agent.get("exit_code") if isinstance(agent, dict) else None
+        eval_error = (
+            eval_result.get("error")
+            if isinstance(eval_result, dict)
+            else None
+        )
+        validation = eval_result.get("validation") if isinstance(eval_result, dict) else {}
+        validation_exit = (
+            validation.get("exit_code")
+            if isinstance(validation, dict)
+            else None
+        )
+        if agent_exit in (0, None) and not eval_error and validation_exit in (0, None):
+            continue
+        rows.append(
+            "- i={i} agent_exit={agent_exit} eval_error={eval_error} validation_exit={validation_exit}".format(
+                i=item.get("iteration"),
+                agent_exit=agent_exit,
+                eval_error=(str(eval_error)[:120] if eval_error is not None else "n/a"),
+                validation_exit=validation_exit,
+            )
+        )
+    if not rows:
+        return "- none"
+    return "\n".join(rows)
+
+
+def render_sysadmin_prompt(
+    cfg: Config,
+    state: dict[str, Any],
+    *,
+    iteration: int,
+    iter_dir: Path,
+    state_path: Path,
+    target_label: str,
+) -> str:
+    template = (
+        read_text(cfg.sysadmin_prompt_template_path)
+        if cfg.sysadmin_prompt_template_path is not None
+        else DEFAULT_SYSADMIN_PROMPT_TEMPLATE
+    )
+    return template.format(
+        iteration=iteration,
+        target_label=target_label or "pass objective gate",
+        failure_streak=recent_agent_failure_streak(state),
+        iter_dir=str(iter_dir),
+        state_path=str(state_path),
+        strategy_file=str(cfg.strategy_file),
+        recent_history=recent_history_summary(state, count=10),
+        recent_failures=recent_failure_summary(state, count=8),
+    )
+
+
+def parse_first_json_object(text: str) -> dict[str, Any] | None:
+    payload = text.strip()
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+        if isinstance(data, dict):
+            return data
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{[\s\S]*\}", payload)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        return None
+
+
+def should_run_sysadmin(cfg: Config, state: dict[str, Any], iteration: int) -> tuple[bool, str]:
+    if not cfg.sysadmin_enabled:
+        return False, "disabled"
+
+    last = safe_int(state.get("sysadmin_last_iteration"))
+    if last is not None and last == iteration:
+        return False, "already_checked"
+
+    if iteration == 0:
+        return True, "startup"
+
+    if iteration % cfg.sysadmin_interval_iterations == 0:
+        return True, "interval"
+
+    if recent_agent_failure_streak(state) >= cfg.sysadmin_failure_streak_trigger:
+        return True, "failure_streak"
+
+    return False, "not_due"
+
+
+def apply_sysadmin_action(cfg: Config, action: str) -> str:
+    if action == "noop":
+        return "noop"
+    if action == "sleep_60":
+        time.sleep(60)
+        return "slept_60s"
+    if action == "sleep_300":
+        time.sleep(300)
+        return "slept_300s"
+    if action == "restart_from_baseline":
+        if cfg.baseline_strategy_file is None or not cfg.baseline_strategy_file.exists():
+            return "restart_from_baseline_skipped_missing_baseline"
+        shutil.copy2(cfg.baseline_strategy_file, cfg.strategy_file)
+        return "reseeded_from_baseline"
+    return f"unknown_action:{action}"
+
+
+def run_sysadmin_check(
+    cfg: Config,
+    state: dict[str, Any],
+    *,
+    iteration: int,
+    iter_dir: Path,
+    state_path: Path,
+    target_label: str,
+) -> dict[str, Any]:
+    sys_dir = iter_dir / "sysadmin"
+    sys_dir.mkdir(parents=True, exist_ok=True)
+    prompt_text = render_sysadmin_prompt(
+        cfg,
+        state,
+        iteration=iteration,
+        iter_dir=iter_dir,
+        state_path=state_path,
+        target_label=target_label,
+    )
+    prompt_path = sys_dir / "sysadmin_prompt.md"
+    write_text(prompt_path, prompt_text)
+
+    command = cfg.sysadmin_command_template.format(
+        prompt_file=shlex.quote(str(prompt_path)),
+        state_file=shlex.quote(str(state_path)),
+        strategy_file=shlex.quote(str(cfg.strategy_file)),
+        workspace=shlex.quote(str(cfg.workspace)),
+        iteration=iteration,
+        iter_dir=shlex.quote(str(iter_dir)),
+    )
+    result = run_command(
+        command,
+        cwd=cfg.workspace,
+        timeout_sec=cfg.sysadmin_timeout_sec,
+        use_shell=cfg.sysadmin_use_shell,
+    )
+    write_text(sys_dir / "stdout.log", result.stdout)
+    write_text(sys_dir / "stderr.log", result.stderr)
+
+    parsed = parse_first_json_object(result.stdout)
+    action = "noop"
+    decision = "continue"
+    health = "degraded"
+    root_cause = "sysadmin output unavailable"
+    notes = ""
+    combined_output = (result.stdout + "\n" + result.stderr).lower()
+
+    if "insufficient_quota" in combined_output or "rate limit" in combined_output:
+        action = "sleep_300"
+        health = "broken"
+        root_cause = "OpenAI quota/rate-limit while running sysadmin check"
+    elif result.timed_out or result.exit_code != 0:
+        action = "sleep_60"
+        root_cause = "sysadmin check command failed"
+
+    if parsed is not None:
+        decision = str(parsed.get("decision", "continue")).strip().lower() or "continue"
+        health = str(parsed.get("health", "degraded")).strip().lower() or "degraded"
+        root_cause = str(parsed.get("root_cause", "n/a")).strip()
+        notes = str(parsed.get("notes", "")).strip()
+        action = str(parsed.get("action", "noop")).strip().lower() or "noop"
+
+    applied = apply_sysadmin_action(cfg, action)
+
+    return {
+        "timestamp": now_iso(),
+        "iteration": iteration,
+        "trigger": state.get("sysadmin_trigger_reason"),
+        "command": command,
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "duration_sec": result.duration_sec,
+        "decision": decision,
+        "health": health,
+        "root_cause": root_cause,
+        "notes": notes,
+        "requested_action": action,
+        "applied_action": applied,
+        "raw_stdout_path": str(sys_dir / "stdout.log"),
+        "raw_stderr_path": str(sys_dir / "stderr.log"),
+    }
+
+
 def choose_mode(state: dict[str, Any], cfg: Config, iteration: int) -> str:
     if iteration > 0 and iteration % cfg.restart_interval == 0:
         return "restart"
@@ -715,12 +1021,20 @@ def run_harness(cfg: Config) -> int:
     ):
         state["stopped_reason"] = None
         save_state(state_path, state)
+    if cfg.max_iterations == 0 and state.get("stopped_reason") == "max_iterations_reached":
+        state["stopped_reason"] = None
+        save_state(state_path, state)
     if migrate_cost_accounting(state, cfg):
         save_state(state_path, state)
 
     start_iter = len(state.get("iterations", []))
+    iteration_source = (
+        itertools.count(start_iter)
+        if cfg.max_iterations == 0
+        else range(start_iter, cfg.max_iterations)
+    )
 
-    for iteration in range(start_iter, cfg.max_iterations):
+    for iteration in iteration_source:
         spent = float(state.get("budget_spent_usd", 0.0))
         if budget_limit_enabled(cfg) and spent >= cfg.budget_max_usd:
             state["stopped_reason"] = "budget_exhausted"
@@ -899,6 +1213,31 @@ def run_harness(cfg: Config) -> int:
         state.setdefault("iterations", []).append(iteration_record)
         save_state(state_path, state)
 
+        run_guard, trigger = should_run_sysadmin(cfg, state, iteration)
+        if run_guard:
+            state["sysadmin_trigger_reason"] = trigger
+            sysadmin_record = run_sysadmin_check(
+                cfg,
+                state,
+                iteration=iteration,
+                iter_dir=iter_dir,
+                state_path=state_path,
+                target_label=target_label,
+            )
+            state.pop("sysadmin_trigger_reason", None)
+            state["sysadmin_last_iteration"] = iteration
+            state.setdefault("sysadmin_checks", []).append(sysadmin_record)
+            state["iterations"][-1]["sysadmin"] = sysadmin_record
+            save_state(state_path, state)
+            print(
+                "Sysadmin check: trigger={trigger} health={health} action={action} cause={cause}".format(
+                    trigger=trigger,
+                    health=sysadmin_record.get("health"),
+                    action=sysadmin_record.get("applied_action"),
+                    cause=sysadmin_record.get("root_cause"),
+                )
+            )
+
         print(
             "Eval summary: train_avg={train_avg} train_worst={train_worst} "
             "holdout_avg={holdout_avg} promoted={promoted} passed={passed}".format(
@@ -911,10 +1250,12 @@ def run_harness(cfg: Config) -> int:
         )
 
         if passed:
-            state["stopped_reason"] = "target_reached"
-            save_state(state_path, state)
-            print(f"SUCCESS: reached target ({target_label}).")
-            return 0
+            if cfg.stop_on_target:
+                state["stopped_reason"] = "target_reached"
+                save_state(state_path, state)
+                print(f"SUCCESS: reached target ({target_label}).")
+                return 0
+            print(f"Target reached ({target_label}); continuing because stop_on_target=false.")
 
         if budget_limit_enabled(cfg) and float(state.get("budget_spent_usd", 0.0)) >= cfg.budget_max_usd:
             state["stopped_reason"] = "budget_exhausted"
@@ -945,8 +1286,12 @@ def dry_run(cfg: Config) -> int:
     print(f"strategy_file: {cfg.strategy_file}")
     print(f"state_dir: {cfg.state_dir}")
     print(f"max_iterations: {cfg.max_iterations}")
+    print(f"stop_on_target: {cfg.stop_on_target}")
     print(f"agent_command_template: {cfg.agent_command_template}")
     print(f"task_command_template: {cfg.task_command_template}")
+    print(f"sysadmin_enabled: {cfg.sysadmin_enabled}")
+    if cfg.sysadmin_enabled:
+        print(f"sysadmin_command_template: {cfg.sysadmin_command_template}")
 
     if context_result.exit_code != 0:
         print("\nTask context call failed.")

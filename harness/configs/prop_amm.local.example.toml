@@ -7,6 +7,7 @@ prompt_template = "harness/templates/default_prompt.md"
 
 [loop]
 max_iterations = 200
+stop_on_target = true
 agent_timeout_sec = 1800
 task_timeout_sec = 1800
 stagnation_window = 8
@@ -34,3 +35,13 @@ use_shell = true
 # input_per_million = 1.50
 # cached_input_per_million = 0.375
 # output_per_million = 6.00
+
+# Optional periodic sysadmin check.
+# [sysadmin]
+# enabled = true
+# interval_iterations = 12
+# failure_streak_trigger = 4
+# timeout_sec = 300
+# prompt_template = "harness/templates/sysadmin_prompt.md"
+# command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model $SYSADMIN_MODEL --reasoning-effort high"
+# use_shell = true

@@ -16,6 +16,7 @@ Options:
   --remote <name>              Git remote (default: origin)
   --openai-param <name>        SSM parameter name for OpenAI API key (default: /prop-amm-harness/OPENAI_API_KEY)
   --agent-model <model>        AGENT_MODEL written to env file (default: gpt-5)
+  --sysadmin-model <model>     SYSADMIN_MODEL written to env file (default: gpt-5.3)
   --no-restart                 Do not restart prop-amm-harness.service
   --wait-timeout <sec>         Wait timeout for command completion (default: 900)
   -h, --help                   Show help
@@ -33,6 +34,7 @@ REPO_DIR="/opt/prop-amm/repo"
 REMOTE_NAME="origin"
 OPENAI_PARAM="${OPENAI_PARAM:-/prop-amm-harness/OPENAI_API_KEY}"
 AGENT_MODEL_VALUE="${AGENT_MODEL:-gpt-5}"
+SYSADMIN_MODEL_VALUE="${SYSADMIN_MODEL:-gpt-5.3}"
 RESTART_SERVICE="true"
 WAIT_TIMEOUT="900"
 
@@ -52,6 +54,8 @@ while [[ $# -gt 0 ]]; do
       OPENAI_PARAM="$2"; shift 2 ;;
     --agent-model)
       AGENT_MODEL_VALUE="$2"; shift 2 ;;
+    --sysadmin-model)
+      SYSADMIN_MODEL_VALUE="$2"; shift 2 ;;
     --no-restart)
       RESTART_SERVICE="false"; shift ;;
     --wait-timeout)
@@ -105,6 +109,7 @@ openai_key="\$(aws ssm get-parameter --region '${REGION}' --name '${OPENAI_PARAM
 cat > /etc/prop-amm/harness.env <<ENV
 OPENAI_API_KEY=\$openai_key
 AGENT_MODEL=${AGENT_MODEL_VALUE}
+SYSADMIN_MODEL=${SYSADMIN_MODEL_VALUE}
 ENV
 chmod 600 /etc/prop-amm/harness.env
 

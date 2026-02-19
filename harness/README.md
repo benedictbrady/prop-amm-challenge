@@ -42,6 +42,13 @@ See `harness/CLOUD.md`.
 - If the agent process fails early (non-zero exit), `fallback_on_failure_usd` is charged (default `0.0`).
 - Legacy state files are migrated to this policy automatically on next run.
 
+## Continuous Mode + Sysadmin Guard
+
+- Set `loop.max_iterations = 0` for unbounded iterations.
+- Set `loop.stop_on_target = false` to continue optimizing after target hits.
+- Enable `[sysadmin]` to run a periodic high-reasoning health check and auto-remediation actions.
+- Default cloud config uses `SYSADMIN_MODEL` (for example `gpt-5.3`) via `harness/agents/openai_sysadmin.py`.
+
 ## Why this is reusable
 
 To support a new problem, keep the same loop and either:

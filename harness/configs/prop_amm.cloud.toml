@@ -6,7 +6,8 @@ state_dir = ".harness"
 prompt_template = "harness/templates/default_prompt.md"
 
 [loop]
-max_iterations = 220
+max_iterations = 0
+stop_on_target = false
 agent_timeout_sec = 1500
 task_timeout_sec = 1800
 stagnation_window = 8
@@ -32,4 +33,13 @@ use_shell = true
 
 [task]
 command_template = "python3 harness/tasks/prop_amm/adapter.py --config harness/tasks/prop_amm/task.toml --action {action} --workspace {workspace} --strategy-file {strategy_file} --mode {mode} --iteration {iteration} --log-dir {iter_dir}/task"
+use_shell = true
+
+[sysadmin]
+enabled = true
+interval_iterations = 12
+failure_streak_trigger = 4
+timeout_sec = 300
+prompt_template = "harness/templates/sysadmin_prompt.md"
+command_template = "python3 harness/agents/openai_sysadmin.py --prompt-file {prompt_file} --model $SYSADMIN_MODEL --reasoning-effort high"
 use_shell = true
