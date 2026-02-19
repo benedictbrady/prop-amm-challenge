@@ -18,6 +18,7 @@ elite_pool_size = 8
 [budget]
 max_usd = 1000.0
 fallback_per_iteration_usd = 6.0
+fallback_on_failure_usd = 0.0
 
 [pricing]
 # Update these when model pricing changes.

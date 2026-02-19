@@ -46,6 +46,8 @@ use_shell = true
 max_usd = 1000.0
 # Used when the agent output does not expose cost/tokens.
 fallback_per_iteration_usd = 5.0
+# Used when the agent process fails before producing any usage/cost signal.
+fallback_on_failure_usd = 0.0
 
 # Optional: enable exact-ish per-iteration cost from token usage if your
 # agent outputs token counts in logs. Otherwise fallback_per_iteration_usd is used.

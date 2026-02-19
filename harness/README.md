@@ -34,6 +34,13 @@ Use either:
 
 See `harness/CLOUD.md`.
 
+## Budget Accounting Notes
+
+- If agent output contains `COST_USD=...` or token usage fields, the harness uses parsed cost.
+- If cost cannot be parsed and the agent exits successfully, `fallback_per_iteration_usd` is charged.
+- If the agent process fails early (non-zero exit), `fallback_on_failure_usd` is charged (default `0.0`).
+- Legacy state files are migrated to this policy automatically on next run.
+
 ## Why this is reusable
 
 To support a new problem, keep the same loop and either:

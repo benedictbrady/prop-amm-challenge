@@ -138,6 +138,7 @@ class Config:
     agent_use_shell: bool
     budget_max_usd: float
     budget_fallback_per_iteration: float
+    budget_fallback_on_failure: float
     pricing: PricingSpec | None
     stagnation_window: int
     stagnation_min_delta: float
@@ -295,6 +296,7 @@ def load_config(path: Path) -> Config:
         agent_use_shell=bool(agent.get("use_shell", True)),
         budget_max_usd=float(budget.get("max_usd", 1000.0)),
         budget_fallback_per_iteration=float(budget.get("fallback_per_iteration_usd", 5.0)),
+        budget_fallback_on_failure=float(budget.get("fallback_on_failure_usd", 0.0)),
         pricing=pricing,
         stagnation_window=int(loop.get("stagnation_window", 8)),
         stagnation_min_delta=float(loop.get("stagnation_min_delta", 2.0)),
@@ -313,6 +315,8 @@ def load_config(path: Path) -> Config:
         raise HarnessError("budget.max_usd must be > 0")
     if cfg.budget_fallback_per_iteration < 0:
         raise HarnessError("budget.fallback_per_iteration_usd must be >= 0")
+    if cfg.budget_fallback_on_failure < 0:
+        raise HarnessError("budget.fallback_on_failure_usd must be >= 0")
     if cfg.stagnation_window < 2:
         raise HarnessError("loop.stagnation_window must be >= 2")
     if cfg.diversification_interval < 2:
@@ -343,6 +347,7 @@ def load_state(state_path: Path) -> dict[str, Any]:
             "created_at": now_iso(),
             "updated_at": now_iso(),
             "budget_spent_usd": 0.0,
+            "cost_policy_version": 2,
             "iterations": [],
             "elites": [],
             "best_train_avg": float("-inf"),
@@ -454,6 +459,81 @@ def parse_agent_cost(text: str, pricing: PricingSpec | None) -> float | None:
         + (output_tokens / 1_000_000.0) * pricing.output_per_million
     )
     return cost
+
+
+def safe_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def safe_int(value: Any) -> int | None:
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def compute_iteration_cost(
+    *,
+    parsed_cost: float | None,
+    fallback_per_iteration: float,
+    fallback_on_failure: float,
+    agent_exit_code: int | None,
+    agent_timed_out: bool,
+) -> tuple[float, str]:
+    if parsed_cost is not None:
+        return parsed_cost, "parsed"
+    if agent_timed_out or agent_exit_code == 0:
+        return fallback_per_iteration, "fallback_per_iteration"
+    return fallback_on_failure, "fallback_on_failure"
+
+
+def migrate_cost_accounting(state: dict[str, Any], cfg: Config) -> bool:
+    if int(state.get("cost_policy_version", 1)) >= 2:
+        return False
+
+    iterations = state.get("iterations", [])
+    if not isinstance(iterations, list):
+        state["cost_policy_version"] = 2
+        state["budget_spent_usd"] = 0.0
+        return True
+
+    running_spend = 0.0
+    for item in iterations:
+        if not isinstance(item, dict):
+            continue
+        agent = item.get("agent")
+        if not isinstance(agent, dict):
+            agent = {}
+            item["agent"] = agent
+
+        parsed_cost = safe_float(agent.get("cost_usd")) if bool(agent.get("cost_parsed")) else None
+        iter_cost, cost_source = compute_iteration_cost(
+            parsed_cost=parsed_cost,
+            fallback_per_iteration=cfg.budget_fallback_per_iteration,
+            fallback_on_failure=cfg.budget_fallback_on_failure,
+            agent_exit_code=safe_int(agent.get("exit_code")),
+            agent_timed_out=bool(agent.get("timed_out", False)),
+        )
+        running_spend += iter_cost
+
+        agent["cost_usd"] = iter_cost
+        agent["cost_source"] = cost_source
+        item["budget_spent_usd"] = running_spend
+
+    state["budget_spent_usd"] = running_spend
+    state["cost_policy_version"] = 2
+    return True
 
 
 def folds_summary(folds: list[FoldSpec]) -> str:
@@ -693,6 +773,8 @@ def run_harness(cfg: Config) -> int:
 
     state_path = cfg.state_dir / "state.json"
     state = load_state(state_path)
+    if migrate_cost_accounting(state, cfg):
+        save_state(state_path, state)
 
     start_iter = len(state.get("iterations", []))
 
@@ -739,16 +821,18 @@ def run_harness(cfg: Config) -> int:
 
         combined_agent_output = agent_result.stdout + "\n" + agent_result.stderr
         parsed_cost = parse_agent_cost(combined_agent_output, cfg.pricing)
-        iter_cost = (
-            parsed_cost
-            if parsed_cost is not None
-            else cfg.budget_fallback_per_iteration
+        iter_cost, cost_source = compute_iteration_cost(
+            parsed_cost=parsed_cost,
+            fallback_per_iteration=cfg.budget_fallback_per_iteration,
+            fallback_on_failure=cfg.budget_fallback_on_failure,
+            agent_exit_code=agent_result.exit_code,
+            agent_timed_out=agent_result.timed_out,
         )
         state["budget_spent_usd"] = float(state.get("budget_spent_usd", 0.0)) + iter_cost
 
         print(
             f"Agent exit={agent_result.exit_code} timeout={agent_result.timed_out} "
-            f"dur={agent_result.duration_sec:.1f}s cost=${iter_cost:.2f}"
+            f"dur={agent_result.duration_sec:.1f}s cost=${iter_cost:.2f} ({cost_source})"
         )
 
         if not cfg.strategy_file.exists():
@@ -872,6 +956,7 @@ def run_harness(cfg: Config) -> int:
                 "duration_sec": agent_result.duration_sec,
                 "cost_usd": iter_cost,
                 "cost_parsed": parsed_cost is not None,
+                "cost_source": cost_source,
             },
             "validation": validate_info,
             "train_results": [

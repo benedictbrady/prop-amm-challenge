@@ -18,6 +18,7 @@ elite_pool_size = 6
 [budget]
 max_usd = 1000.0
 fallback_per_iteration_usd = 5.0
+fallback_on_failure_usd = 0.0
 
 [agent]
 # Replace with your local coding agent runtime command.
