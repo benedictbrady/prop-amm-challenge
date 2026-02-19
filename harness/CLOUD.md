@@ -44,6 +44,8 @@ docker run --rm \
 
 ## Using a different agent runtime
 
+Default cloud config uses `harness/agents/openai_ops_agent.py`, which can run shell commands and edit broadly in the workspace.
+
 If you prefer Codex CLI, Claude Code, OpenHands, etc., only change `agent.command_template` in config. The loop and task adapter stay unchanged.
 
 The optional sysadmin guard uses `sysadmin.command_template` and `SYSADMIN_MODEL`.

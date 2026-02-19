@@ -12,7 +12,8 @@ The core loop (`harness/core/loop.py`) is problem-agnostic.
 - `harness/core/loop.py`: generic iteration engine, budget management, anti-local-minima policy, state persistence
 - `harness/tasks/prop_amm/adapter.py`: Prop AMM-specific evaluator
 - `harness/tasks/prop_amm/task.toml`: Prop AMM scoring config (folds, thresholds, parse regex)
-- `harness/agents/openai_file_editor.py`: default cloud-friendly agent backend
+- `harness/agents/openai_ops_agent.py`: default cloud ops-capable agent backend
+- `harness/agents/openai_file_editor.py`: minimal one-file editor backend
 - `harness/configs/prop_amm.local.example.toml`: local config template
 - `harness/configs/prop_amm.cloud.example.toml`: cloud config template
 - `harness/ADAPTER_INTERFACE.md`: contract for creating new task adapters
