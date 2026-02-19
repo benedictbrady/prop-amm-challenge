@@ -44,6 +44,7 @@ use_shell = true
 
 [budget]
 max_usd = 1000.0
+# Set to 0 to disable internal budget stopping.
 # Used when the agent output does not expose cost/tokens.
 fallback_per_iteration_usd = 5.0
 # Used when the agent process fails before producing any usage/cost signal.

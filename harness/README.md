@@ -37,6 +37,7 @@ See `harness/CLOUD.md`.
 ## Budget Accounting Notes
 
 - If agent output contains `COST_USD=...` or token usage fields, the harness uses parsed cost.
+- Set `budget.max_usd = 0` to disable internal budget stop checks.
 - If cost cannot be parsed and the agent exits successfully, `fallback_per_iteration_usd` is charged.
 - If the agent process fails early (non-zero exit), `fallback_on_failure_usd` is charged (default `0.0`).
 - Legacy state files are migrated to this policy automatically on next run.

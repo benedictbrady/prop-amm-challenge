@@ -238,8 +238,8 @@ def load_config(path: Path) -> Config:
         raise HarnessError("loop.restart_interval must be >= 2")
     if cfg.elite_pool_size < 1:
         raise HarnessError("loop.elite_pool_size must be >= 1")
-    if cfg.budget_max_usd <= 0:
-        raise HarnessError("budget.max_usd must be > 0")
+    if cfg.budget_max_usd < 0:
+        raise HarnessError("budget.max_usd must be >= 0 (0 disables internal cap)")
     if cfg.budget_fallback_per_iteration < 0:
         raise HarnessError("budget.fallback_per_iteration_usd must be >= 0")
     if cfg.budget_fallback_on_failure < 0:
@@ -409,6 +409,10 @@ def compute_iteration_cost(
     return fallback_on_failure, "fallback_on_failure"
 
 
+def budget_limit_enabled(cfg: Config) -> bool:
+    return cfg.budget_max_usd > 0
+
+
 def migrate_cost_accounting(state: dict[str, Any], cfg: Config) -> bool:
     if int(state.get("cost_policy_version", 1)) >= 2:
         return False
@@ -443,9 +447,8 @@ def migrate_cost_accounting(state: dict[str, Any], cfg: Config) -> bool:
         item["budget_spent_usd"] = running_spend
 
     state["budget_spent_usd"] = running_spend
-    if (
-        state.get("stopped_reason") == "budget_exhausted"
-        and running_spend < cfg.budget_max_usd
+    if state.get("stopped_reason") == "budget_exhausted" and (
+        not budget_limit_enabled(cfg) or running_spend < cfg.budget_max_usd
     ):
         state["stopped_reason"] = None
     state["cost_policy_version"] = 2
@@ -574,7 +577,11 @@ def render_prompt(
     )
 
     spent = float(state.get("budget_spent_usd", 0.0))
-    remaining = max(0.0, cfg.budget_max_usd - spent)
+    remaining = (
+        max(0.0, cfg.budget_max_usd - spent)
+        if budget_limit_enabled(cfg)
+        else float("inf")
+    )
 
     return template.format(
         iteration=iteration,
@@ -681,9 +688,17 @@ def update_elites(
     del elites[cfg.elite_pool_size :]
 
 
-def print_iteration_header(iteration: int, mode: str, budget_spent: float, budget_max: float) -> None:
+def print_iteration_header(
+    iteration: int,
+    mode: str,
+    budget_spent: float,
+    budget_max: float,
+    *,
+    budget_enabled: bool,
+) -> None:
+    budget_label = f"${budget_max:.2f}" if budget_enabled else "unlimited"
     print(
-        f"\n=== Iteration {iteration} | mode={mode} | budget=${budget_spent:.2f}/${budget_max:.2f} ==="
+        f"\n=== Iteration {iteration} | mode={mode} | budget=${budget_spent:.2f}/{budget_label} ==="
     )
 
 
@@ -694,9 +709,9 @@ def run_harness(cfg: Config) -> int:
 
     state_path = cfg.state_dir / "state.json"
     state = load_state(state_path)
-    if (
-        state.get("stopped_reason") == "budget_exhausted"
-        and float(state.get("budget_spent_usd", 0.0)) < cfg.budget_max_usd
+    if state.get("stopped_reason") == "budget_exhausted" and (
+        not budget_limit_enabled(cfg)
+        or float(state.get("budget_spent_usd", 0.0)) < cfg.budget_max_usd
     ):
         state["stopped_reason"] = None
         save_state(state_path, state)
@@ -707,14 +722,20 @@ def run_harness(cfg: Config) -> int:
 
     for iteration in range(start_iter, cfg.max_iterations):
         spent = float(state.get("budget_spent_usd", 0.0))
-        if spent >= cfg.budget_max_usd:
+        if budget_limit_enabled(cfg) and spent >= cfg.budget_max_usd:
             state["stopped_reason"] = "budget_exhausted"
             save_state(state_path, state)
             print("Budget exhausted before next iteration.")
             return 2
 
         mode = choose_mode(state, cfg, iteration)
-        print_iteration_header(iteration, mode, spent, cfg.budget_max_usd)
+        print_iteration_header(
+            iteration,
+            mode,
+            spent,
+            cfg.budget_max_usd,
+            budget_enabled=budget_limit_enabled(cfg),
+        )
 
         iter_dir = iterations_dir / f"iter_{iteration:04d}"
         iter_dir.mkdir(parents=True, exist_ok=True)
@@ -895,7 +916,7 @@ def run_harness(cfg: Config) -> int:
             print(f"SUCCESS: reached target ({target_label}).")
             return 0
 
-        if float(state.get("budget_spent_usd", 0.0)) >= cfg.budget_max_usd:
+        if budget_limit_enabled(cfg) and float(state.get("budget_spent_usd", 0.0)) >= cfg.budget_max_usd:
             state["stopped_reason"] = "budget_exhausted"
             save_state(state_path, state)
             print("Budget exhausted; stopping.")

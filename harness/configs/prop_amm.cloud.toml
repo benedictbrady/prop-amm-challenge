@@ -16,7 +16,7 @@ restart_interval = 11
 elite_pool_size = 8
 
 [budget]
-max_usd = 1000.0
+max_usd = 0.0
 fallback_per_iteration_usd = 6.0
 fallback_on_failure_usd = 0.0
 
